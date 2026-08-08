@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- Standalone parent for qits-projects-daemon, the per-project agent container. Trimmed to
+         only what the modules need — the quarkus-bom import, the version-management entries for
+         the four reactor modules, and the quarkus/compiler/surefire plugin pins. The monorepo's
+         app-wide machinery (spotless, enforcer, jandex, test chunking) is deliberately absent: the
+         clone-alone rule is that `./mvnw verify` is green from this repo with nothing else on
+         disk. -->
+    <groupId>eu.wohlben</groupId>
+    <artifactId>qits</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+
+    <modules>
+        <!-- Dependency order: projects-daemon depends on all of them; qits-coding-agents depends
+             on qits-commands. -->
+        <module>projects-daemon-protocol</module>
+        <module>qits-commands</module>
+        <module>qits-coding-agents</module>
+        <module>projects-daemon</module>
+    </modules>
+
+    <properties>
+        <maven.compiler.release>25</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+        <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
+        <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
+        <quarkus.platform.version>3.34.6</quarkus.platform.version>
+
+        <compiler-plugin.version>3.15.0</compiler-plugin.version>
+        <surefire-plugin.version>3.5.4</surefire-plugin.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Supplies the managed versions the children leave unversioned: quarkus-arc,
+                 quarkus-vertx, vertx-core, junit-jupiter, quarkus-junit5. -->
+            <dependency>
+                <groupId>${quarkus.platform.group-id}</groupId>
+                <artifactId>${quarkus.platform.artifact-id}</artifactId>
+                <version>${quarkus.platform.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- The wire contract. Vendored into qits-projects later; see AGENTS.md. -->
+            <dependency>
+                <groupId>eu.wohlben</groupId>
+                <artifactId>projects-daemon-protocol</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <!-- The command and coding-agent capability jars. Named without a daemon prefix
+                 because they are the two surfaces most likely to be re-extracted into repos of
+                 their own; keeping the daemon's name out of their coordinates means that move
+                 would not rename them. -->
+            <dependency>
+                <groupId>eu.wohlben</groupId>
+                <artifactId>qits-commands</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>eu.wohlben</groupId>
+                <artifactId>qits-coding-agents</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>${quarkus.platform.group-id}</groupId>
+                    <artifactId>quarkus-maven-plugin</artifactId>
+                    <version>${quarkus.platform.version}</version>
+                </plugin>
+                <plugin>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>${compiler-plugin.version}</version>
+                    <configuration>
+                        <parameters>true</parameters>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <version>${surefire-plugin.version}</version>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+</project>
