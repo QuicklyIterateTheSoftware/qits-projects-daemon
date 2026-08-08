@@ -151,6 +151,14 @@ went and the seams that consumed it were answered differently:
   `REPOSITORY`.
 - `READ_ONLY_ACTION_TOOLS` and `READ_ONLY_OBSERVABILITY_TOOLS` allowlists, with their servers.
 
+**A launch attaches exactly one MCP server**, `repository`, and it is the one carrying the epic
+tools — the whole reason this container exists. Excluding the workspace world is deliberate: a
+refinement agent's job is the project's plan, not workspace actions or another service's telemetry.
+Nothing can put the others back at runtime either. Claude is launched with `--strict-mcp-config`, so
+the rendered `--mcp-config` is the complete set and the shared `/claude-home` volume's own MCP
+entries are ignored; Kimi gets a launch-local `mcp.json` in a throwaway `KIMI_CODE_HOME`. Both are
+asserted in `AgentLaunchServiceTest`.
+
 **Other.**
 
 - `docs/openapi.yml` and `OpenApiContractTest`. The surface here is four routes plus two sockets;
@@ -167,8 +175,10 @@ the code says so differently.
 
 - **The MCP server** (`DaemonMcpEndpoints`): the control socket and the `repository` MCP server are
   both **qits-projects**. Same service, same authority — the derivation is a property of the
-  topology, not a guess. No WARN. `qits.repository-mcp.url` overrides it to point at another
-  instance, not to correct it.
+  topology, not a guess. No WARN. It is nonetheless only the *fallback* now: qits-projects states
+  the address outright as `QITS_REPOSITORY_MCP_URL`, and a stated address beats a sound derivation
+  the day the MCP server stops being co-located. The derivation stays so a container created before
+  that env, or a daemon run by hand, still works.
 - **The git host** (`Provisioner`): the control socket is qits-projects, the git host is
   qits-artifacts. Different services, so `<authority>/artifacts/git` only holds where one authority
   routes every segment. Taking that fallback emits a `DaemonLog` WARN naming the assumption.
@@ -188,6 +198,12 @@ warnings; a silent unsound one loses a whole class of misconfiguration.
     QITS_PROJECTS_DAEMON_API_PORT        default 13338
     QITS_PROJECTS_DAEMON_HOOKS_PORT      default 13337
     QITS_PROJECTS_DAEMON_CLAUDE_MOUNT    shared credential volume, default /claude-home
+    QITS_REPOSITORY_MCP_URL              the one MCP server a launch attaches; absent ⇒ derived
+
+`QITS_REPOSITORY_MCP_URL` is the odd name out — no `QITS_PROJECTS_DAEMON_` prefix — because it is
+the existing `qits.repository-mcp.url` key, the spelling the workspace daemon uses for the same
+server. qits-projects injects it on every container it creates, so the address is stated; absent, it
+falls back to the derivation in `DaemonMcpEndpoints`.
 
 Every identity value is `Optional<String>` in the code, never `@ConfigProperty(defaultValue = "")`:
 SmallRye reads an empty default as *no value* and then fails to resolve a plain `String`, which

@@ -88,6 +88,17 @@ public final class AgentLaunchService {
    * and inspect without a permission prompt. The mutating tools are left out so the agent still
    * prompts before changing anything. Names are the agent's MCP tool ids: {@code
    * mcp__<server>__<tool>}.
+   *
+   * <p>The server carries two surfaces, so this list does too: the repository tools and the epic
+   * ones a refinement session drafts through. {@code list_epics} and {@code get_epic} are the survey
+   * the agent has to make before it can tell "extend this draft" from "propose a new epic", and
+   * pre-approving them is the same call as pre-approving {@code listRepositories}. Every epic
+   * <em>write</em> — {@code propose_epic} and the feature/task mutators — stays off the list and
+   * still prompts, because a drafted plan is a change to the project.
+   *
+   * <p>The snake_case half is not a slip: the epic tools declare those names on the qits-projects
+   * side, and the id here must match the declared name character for character or the pre-approval
+   * silently matches nothing.
    */
   private static final List<String> READ_ONLY_REPOSITORY_TOOLS =
       List.of(
@@ -97,7 +108,9 @@ public final class AgentLaunchService {
           "mcp__repository__listCommitChanges",
           "mcp__repository__getCommitFileDiff",
           "mcp__repository__listActions",
-          "mcp__repository__taskPrompt");
+          "mcp__repository__taskPrompt",
+          "mcp__repository__list_epics",
+          "mcp__repository__get_epic");
 
   /** Kimi session ids are opaque {@code session_}-prefixed path-safe slugs. */
   private static final String KIMI_SESSION_PATTERN = "session_[A-Za-z0-9_-]{1,128}";
@@ -562,10 +575,18 @@ public final class AgentLaunchService {
   /**
    * The scoped MCP servers for {@code scope}, with their read-only allowlists.
    *
-   * <p>One server, {@code repository}, served by qits-projects. The workspace daemon listed three
-   * ({@code actions}, {@code repository}, {@code observability}) across three services; a project
-   * agent talks to the service that launched it and nothing else, so the scope only decides how
-   * narrow the one URL is.
+   * <p><strong>Exactly one server</strong>, {@code repository}, served by qits-projects — the one
+   * carrying the epic tools this container exists for. The workspace daemon attaches three ({@code
+   * actions}, {@code repository}, {@code observability}) across three services; none of the other
+   * two is wired here, and that is a decision rather than an omission: this agent's job is the
+   * project's <em>plan</em>, not a workspace's actions or another service's telemetry, and a server
+   * it has no business calling is a tool it can waste a turn on. {@code AgentMcpScope} has no
+   * {@code ACTIONS} value for the same reason, so the scope only decides how narrow the one URL is.
+   *
+   * <p>Nothing else can put a server back either: Claude is launched with {@code
+   * --strict-mcp-config}, so the {@code --mcp-config} rendered from this list is the whole set and
+   * the shared {@code /claude-home} volume's own MCP entries are ignored. Kimi gets a launch-local
+   * {@code mcp.json} in a throwaway home for the same effect.
    */
   List<ScopedMcp> serversFor(AgentMcpScope scope) {
     String projectId = requireId(endpoints.projectId(), "project id");

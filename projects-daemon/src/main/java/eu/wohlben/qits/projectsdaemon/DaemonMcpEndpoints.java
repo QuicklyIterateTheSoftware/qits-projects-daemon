@@ -17,10 +17,15 @@ import java.util.Optional;
  * property of the topology, not a convention, which is why it is stated once here and never warned
  * about at runtime.
  *
- * <p>{@code qits.repository-mcp.url} still overrides it. The derivation is correct, not universal:
- * the override is what points an agent at a different qits instance, or at a separately deployed
- * MCP server if that ever splits out. Contrast {@link Provisioner}, whose git base <em>is</em> a
- * guess about another service and does warn.
+ * <p><b>In a deployment the address is stated, not derived.</b> qits-projects injects {@code
+ * QITS_REPOSITORY_MCP_URL} (→ {@code qits.repository-mcp.url}) into every agent container it
+ * creates, and that value wins here. The derivation below is the fallback: a container created
+ * before that env existed, or a daemon run by hand. Keeping both is what makes the injection safe to
+ * add — no running container had to be recreated for it.
+ *
+ * <p>The override is also what points an agent at a different qits instance, or at a separately
+ * deployed MCP server if that ever splits out. Contrast {@link Provisioner}, whose git base
+ * <em>is</em> a guess about another service and does warn.
  */
 final class DaemonMcpEndpoints implements McpEndpoints {
 

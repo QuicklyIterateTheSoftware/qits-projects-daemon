@@ -324,6 +324,43 @@ class AgentLaunchServiceTest {
       assertFalse(
           servers.get(0).allowedTools().stream().anyMatch(t -> t.contains("integrateBranch")));
     }
+
+    @Test
+    void theEpicSurveyIsPreApprovedAndTheEpicWritesAreNot() {
+      // The refinement agent has to read the plan before it can tell "extend this draft" from
+      // "propose a new epic"; drafting one is a change to the project and still prompts.
+      List<String> allowed = service().serversFor(AgentMcpScope.PROJECT).get(0).allowedTools();
+
+      assertTrue(allowed.contains("mcp__repository__list_epics"), allowed.toString());
+      assertTrue(allowed.contains("mcp__repository__get_epic"), allowed.toString());
+      assertFalse(allowed.contains("mcp__repository__propose_epic"));
+      assertFalse(allowed.stream().anyMatch(t -> t.startsWith("mcp__repository__add_")));
+      assertFalse(allowed.stream().anyMatch(t -> t.startsWith("mcp__repository__update_")));
+      assertFalse(allowed.stream().anyMatch(t -> t.startsWith("mcp__repository__remove_")));
+    }
+
+    @Test
+    void theWorkspaceWorldServersAreNotWiredIntoALaunch() {
+      // The workspace daemon attaches actions/repository/observability. A refinement agent's job is
+      // the project's plan, so only the epic-carrying server is attached — and --strict-mcp-config
+      // is what stops the shared /claude-home volume putting the others back.
+      AgentLaunchService service = service();
+      AgentLaunchService.PinnedSession pinned = service.pinSession(null, false, AgentType.CLAUDE);
+
+      String script = service.renderChat(AgentMcpScope.PROJECT, pinned, AgentType.CLAUDE).script();
+
+      assertTrue(script.contains("--strict-mcp-config"), script);
+      assertEquals(
+          1,
+          script.split("\"mcpServers\"", -1).length - 1,
+          "one --mcp-config, and it is the whole set the session may use");
+      assertEquals(
+          1,
+          script.split("\"repository\":", -1).length - 1,
+          "exactly one server, keyed 'repository' — the one carrying the epic tools");
+      assertFalse(script.contains("\"actions\":"), script);
+      assertFalse(script.contains("\"observability\":"), script);
+    }
   }
 
   // --- rendering --------------------------------------------------------------------------------
