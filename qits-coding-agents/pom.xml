@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben</groupId>
+        <artifactId>qits</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>qits-coding-agents</artifactId>
+
+    <!-- The coding-agent harnesses (Claude Code, Kimi) and everything that reads their state:
+         launch-spec rendering, the ACP transport, session lineage, transcript reads, auth status.
+         Adopted from qits-workspace-daemon; the launch is scoped to a project rather than a
+         workspace, which is the whole of what changed (see McpEndpoints and AgentMcpScope).
+
+         Depends on qits-commands because launching an agent *is* launching a command: the
+         AgentLaunchService -> CommandService direction, never the other way round.
+         Framework-free for the same native-image reason as its sibling. -->
+
+    <dependencies>
+        <dependency>
+            <groupId>eu.wohlben</groupId>
+            <artifactId>qits-commands</artifactId>
+        </dependency>
+        <dependency>
+            <!-- io.vertx.core.json only: the ACP wire and the harness transcript JSONL are both
+                 JSON. Same reasoning as qits-commands. -->
+            <groupId>io.vertx</groupId>
+            <artifactId>vertx-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!-- Same reason as qits-commands: an agent launch goes through
+                         CommandRegistry.spawn, which opens a PTY through ForeignPty's
+                         java.lang.foreign downcalls. -->
+                    <argLine>--enable-native-access=ALL-UNNAMED</argLine>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
