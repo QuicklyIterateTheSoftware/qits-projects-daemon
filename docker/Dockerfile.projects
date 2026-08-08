@@ -1,0 +1,31 @@
+# A project agent container image: an existing toolchain image with this daemon as its entrypoint.
+#
+# This is the shape an agent container actually runs — the toolchain the project's checkout needs,
+# with the daemon as PID 1 — assembled from the two halves that own themselves. The toolchain is not
+# built here and could not be: it is the monolith's `workspace-base` stage, shared with its app
+# image, and reproducing it would put node, maven and a native toolchain in a repo whose rule is
+# that a clone alone builds green with no monorepo and no docker.
+#
+# Build the daemon image first, then layer it:
+#
+#     docker build -t qits/projects-daemon:latest -f docker/Dockerfile .
+#     docker build -t qits/project-agent:native -f docker/Dockerfile.projects .
+#
+# --- why BASE is the FULL workspace toolchain -----------------------------------------------------
+# A leaner base was on the table: a project agent's own job is git plus a coding-agent CLI, and it
+# runs no dev server of its own. It takes the whole toolchain anyway, because the agent's job is to
+# work on the project's code — build it, test it, run its tooling — and a base that cannot compile
+# the project makes the agent useless at the thing it exists for. Trimming it would also fork the
+# toolchain: two images to keep in step, and a build failure that only reproduces in one of them.
+ARG BASE=qits/workspace:latest
+ARG DAEMON_IMAGE=qits/projects-daemon:latest
+
+FROM ${DAEMON_IMAGE} AS daemon
+
+FROM ${BASE}
+COPY --from=daemon /work/qits-projects-daemon /usr/local/bin/qits-projects-daemon
+
+# Replaces whatever the base entrypoints to. No CMD and no `sleep infinity` fallback: a container
+# whose daemon cannot start is not a usable agent, and should fail visibly rather than idle looking
+# healthy.
+ENTRYPOINT ["/usr/local/bin/qits-projects-daemon"]
