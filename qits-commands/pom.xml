@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben</groupId>
+        <artifactId>qits</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>qits-commands</artifactId>
+
+    <!-- Launching and supervising processes in the project checkout: the PTY, the command
+         registry and store, the log buffer and the chat seams. Adopted from
+         qits-workspace-daemon unchanged apart from the identity seam (ProjectContext), because
+         driving a process is the same job whatever the container is scoped to.
+
+         Framework-free: no Quarkus, no CDI, no JAX-RS and no Jackson, so it links into the GraalVM
+         native image with nothing to register and stays plain unit-testable. The projects-daemon
+         module constructs these classes and serves them over ProjectsApi.
+
+         The one framework dependency is vertx-core, and only for io.vertx.core.json: the
+         stream-json chat transport has to parse the harness's line-delimited JSON, and this is
+         already the JSON library the daemon module carries. Adding Jackson for it would put a
+         second JSON stack in the native image. -->
+
+    <dependencies>
+        <dependency>
+            <!-- io.vertx.core.json only — no Vertx instance, no event loop, no HTTP. Version
+                 managed by the quarkus-bom import in the parent. -->
+            <groupId>io.vertx</groupId>
+            <artifactId>vertx-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!-- ForeignPty calls libc through java.lang.foreign, which is a restricted
+                         method: without this the JVM warns on every run and, per the warning's own
+                         text, will refuse it outright in a future release. The native image needs
+                         no equivalent — native access is resolved at build time — but the daemon
+                         run in JVM mode does; see projects-daemon's application.properties. -->
+                    <argLine>--enable-native-access=ALL-UNNAMED</argLine>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
