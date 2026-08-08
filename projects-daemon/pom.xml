@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>eu.wohlben</groupId>
+        <artifactId>qits</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>projects-daemon</artifactId>
+    <packaging>quarkus</packaging>
+
+    <properties>
+        <!-- Build identity baked into the native binary and announced in the daemon's Hello.
+             project.version distinguishes numbered releases, the build timestamp distinguishes
+             floating -SNAPSHOT builds. `timestamp` aliases maven.build.timestamp so it can be
+             referenced with the @-delimited filtering below (maven.build.timestamp is not itself
+             interpolable as a resource token). -->
+        <timestamp>${maven.build.timestamp}</timestamp>
+        <maven.build.timestamp.format>yyyy-MM-dd'T'HH:mm:ss'Z'</maven.build.timestamp.format>
+    </properties>
+
+    <!-- The in-container agent daemon: a Quarkus command-mode app compiled to a GraalVM native
+         binary that becomes each project agent container's process. It dials qits-projects over a
+         WebSocket, self-clones the project's wrapper repository into /workspace, and serves the
+         interactive coding-agent sessions the user drives from a web terminal.
+
+         Deps are deliberately minimal — quarkus-arc (CDI + command mode) + quarkus-vertx (a managed
+         Vertx with NO HTTP server extension, for the Vert.x-core WebSocket client and the two raw
+         vertx-core listeners this module binds itself) + the shared wire contract + the two
+         framework-free capability jars. No quarkus-rest/JAX-RS, no Jackson, no Panache. -->
+
+    <dependencies>
+        <dependency>
+            <groupId>eu.wohlben</groupId>
+            <artifactId>projects-daemon-protocol</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Launching and supervising processes in the checkout, served over ProjectsApi.
+                 Framework-free, so it adds nothing the native-image builder has to be told about
+                 — except its own FFM downcalls, which register themselves from constant
+                 descriptors (see ForeignPty). -->
+            <groupId>eu.wohlben</groupId>
+            <artifactId>qits-commands</artifactId>
+        </dependency>
+        <dependency>
+            <!-- The Claude Code and Kimi harnesses: launch rendering, the ACP chat transport,
+                 transcript import off the shared credential volume, and the agent surface served
+                 over ProjectsApi. Depends on qits-commands (a launch becomes a command), never the
+                 other way round. -->
+            <groupId>eu.wohlben</groupId>
+            <artifactId>qits-coding-agents</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-arc</artifactId>
+        </dependency>
+        <dependency>
+            <!-- Managed Vertx + vertx-core WebSocketClient; brings no HTTP server (unlike
+                 websockets-next), which is exactly right for a client-only container process. -->
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-vertx</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <!-- Filter ONLY application.properties, so `@project.version@` / `@timestamp@` in it are
+             replaced at build time and baked into the native image as MicroProfile config (read via
+             @ConfigProperty in ControlSocket). Every other resource stays unfiltered. -->
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+                <includes>
+                    <include>application.properties</include>
+                </includes>
+            </resource>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>false</filtering>
+                <excludes>
+                    <exclude>application.properties</exclude>
+                </excludes>
+            </resource>
+        </resources>
+        <plugins>
+            <plugin>
+                <!-- @-only delimiters: never expand ${...}, which would clobber Quarkus's own
+                     ${config.expression} references in application.properties. -->
+                <artifactId>maven-resources-plugin</artifactId>
+                <configuration>
+                    <useDefaultDelimiters>false</useDefaultDelimiters>
+                    <delimiters>
+                        <delimiter>@</delimiter>
+                    </delimiters>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>${quarkus.platform.group-id}</groupId>
+                <artifactId>quarkus-maven-plugin</artifactId>
+                <extensions>true</extensions>
+            </plugin>
+            <plugin>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!-- Tests that launch real commands reach ForeignPty's java.lang.foreign
+                         downcalls through CommandRegistry. Same restricted-method flag the two
+                         capability modules set; see application.properties for why a JVM-mode run
+                         needs it on the command line instead. -->
+                    <argLine>--enable-native-access=ALL-UNNAMED</argLine>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!-- GraalVM native build: `-Dnative` disables the jar and enables the native image. The
+             root pom has no native profile to inherit, so it lives here. The Dockerfile's build
+             stage runs `-pl projects-daemon -am package -Dnative`. -->
+        <profile>
+            <id>native</id>
+            <activation>
+                <property>
+                    <name>native</name>
+                </property>
+            </activation>
+            <properties>
+                <quarkus.package.jar.enabled>false</quarkus.package.jar.enabled>
+                <skipITs>false</skipITs>
+                <quarkus.native.enabled>true</quarkus.native.enabled>
+            </properties>
+        </profile>
+    </profiles>
+</project>
