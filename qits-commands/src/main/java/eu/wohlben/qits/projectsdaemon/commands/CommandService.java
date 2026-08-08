@@ -203,6 +203,10 @@ public final class CommandService {
 
   /** Record a RUNNING command and resolve its environment — but don't spawn. */
   private Prepared prepare(LaunchDescriptor descriptor) {
+    // Before the record, not after: a container whose self-provision failed has no checkout to
+    // launch into, and refusing here keeps it from collecting commands stuck in RUNNING that never
+    // had a process.
+    registry.requireCheckout();
     // Recorded first. If the spawn fails afterwards the registry marks it via the exit listener, so
     // a command is never left dangling in RUNNING with no process.
     Command command =

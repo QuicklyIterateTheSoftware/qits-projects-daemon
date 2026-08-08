@@ -80,7 +80,7 @@ public class ControlSocket {
   /**
    * The loopback API over the checkout — the transport for the two capability modules. Injected
    * rather than constructed because, unlike {@link HookWebhook}, it carries its own config knobs;
-   * started once the checkout exists.
+   * started once the boot provision has run, with or without a checkout to show for it.
    */
   @Inject ProjectsApi projectsApi;
 
@@ -166,8 +166,10 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.repository-mcp.url")
   Optional<String> repositoryMcpUrl;
 
-  private String projectId = "";
-  private String repoName = "";
+  // Resolved from config in start(); package-private so a test can wire the surface without dialling
+  // home.
+  String projectId = "";
+  String repoName = "";
 
   /** Off-event-loop pool for blocking process/git work; one thread per in-flight request. */
   private final ExecutorService workers =
@@ -201,8 +203,22 @@ public class ControlSocket {
   /** Transcript aggregates, held here so the query service and the sweep share one instance. */
   private final AgentSessionStore agentSessionStore = new AgentSessionStore();
 
-  /** Ensures the autonomous self-provision runs at most once per daemon lifetime. */
+  /**
+   * Ensures the autonomous self-provision runs at most once per daemon lifetime.
+   *
+   * <p><b>There is no re-provision path, deliberately not invented here.</b> This latch holds for
+   * the whole process lifetime, and qits' {@code ensure} no-ops on a container that is already
+   * running — so a container whose clone failed never retries. Recovery today is to remove the
+   * container and ensure it again.
+   */
   private final AtomicBoolean provisionStarted = new AtomicBoolean();
+
+  /**
+   * Whether the boot self-provision produced a usable checkout. The API binds either way (see {@link
+   * #wireCapabilities}); this is what keeps the degraded surface from claiming a commit it does not
+   * have.
+   */
+  private volatile boolean provisioned;
 
   /** Where the daemon runs the self-clone and every command (image {@code WORKDIR}). */
   private static final File WORKSPACE_DIR = new File("/workspace");
@@ -261,7 +277,10 @@ public class ControlSocket {
     connect(0);
   }
 
-  /** Kick off the boot self-clone on the worker pool, at most once. */
+  /**
+   * Kick off the boot self-clone on the worker pool, at most once, then wire the surface — whatever
+   * the outcome, see {@link #wireCapabilities}.
+   */
   private void startProvisioning() {
     if (!provisionStarted.compareAndSet(false, true)) {
       return;
@@ -270,16 +289,24 @@ public class ControlSocket {
         new Provisioner.Env(projectId, repoName, url.get(), gitBaseConfig.orElse(""));
     workers.execute(
         () -> {
-          if (Provisioner.provision(env, this::send)) {
-            wireCapabilities();
-          }
+          provisioned = Provisioner.provision(env, this::send);
+          wireCapabilities();
         });
   }
 
   /**
-   * Assemble {@code qits-commands} and {@code qits-coding-agents} over the provisioned checkout and
-   * bind the API. A failed provision means qits is tearing the container down, so there is nothing
-   * to wire and the API never binds — every route would answer 500 from a missing checkout anyway.
+   * Assemble {@code qits-commands} and {@code qits-coding-agents} over the checkout and bind the
+   * API — <b>also when the provision failed</b>.
+   *
+   * <p>qits does not tear a failed container down: it records the failure and reports it on the
+   * agent-container read, and the container is left running. So leaving the API unbound would turn
+   * a visible error into a silent 502 — every browser call arrives through the tunnel at a port
+   * nothing listens on — and the one surface that could show the failure would be the one surface
+   * that never binds. Binding keeps the routes reachable, and they degrade honestly against a
+   * missing or partial checkout: the command list is empty, no action is declared, the recorded
+   * commit is blank, and anything that would have to run in the checkout answers 503 with the
+   * reason ({@link eu.wohlben.qits.projectsdaemon.commands.CheckoutUnavailableException}) instead
+   * of "Internal error".
    *
    * <p>The modules are framework-free by design — no CDI — so their objects are constructed here
    * rather than injected. That is also why the wiring is explicit about the two seams: {@link
@@ -293,10 +320,17 @@ public class ControlSocket {
    * <p>A daemon with no dial-home url cannot derive the MCP endpoint an agent would be launched
    * with — but it also never connected, so it is not serving this API either. The agent surface is
    * then left unwired and answers 503.
+   *
+   * <p>Package-private so a test can wire and serve without a provision, which is the case this
+   * whole method now has to survive.
    */
-  private void wireCapabilities() {
+  void wireCapabilities() {
+    // The commit a launch records comes from the checkout, so it is only asked for when there is
+    // one: with no checkout the git read would run in whatever directory the daemon sits in and
+    // could answer with an unrelated repository's HEAD.
     DaemonProjectContext context =
-        new DaemonProjectContext(projectId, repoName, () -> "", ProjectDescriber::head);
+        new DaemonProjectContext(
+            projectId, repoName, () -> "", () -> provisioned ? ProjectDescriber.head() : "");
     CommandStore store = new CommandStore();
     CommandLogService logs = new CommandLogService(store, null);
     CommandLifecycleService lifecycle =

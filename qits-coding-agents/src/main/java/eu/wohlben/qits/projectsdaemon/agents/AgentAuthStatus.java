@@ -1,5 +1,7 @@
 package eu.wohlben.qits.projectsdaemon.agents;
 
+import eu.wohlben.qits.projectsdaemon.commands.CheckoutUnavailableException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
@@ -33,8 +35,17 @@ public final class AgentAuthStatus {
   /**
    * Whether {@code agentType} is signed in. The harness is passed in (the launch has already
    * resolved it) so the auth gate matches exactly the harness about to launch.
+   *
+   * <p>The probe runs <em>in</em> the checkout, so a missing one is reported as such rather than
+   * read as "signed out": answering false would send the launch to an interactive login terminal
+   * that cannot spawn either, and the operator would see a login prompt where the real fault is a
+   * failed self-provision.
    */
   public boolean isLoggedIn(AgentType agentType) {
+    if (!Files.isDirectory(workspaceRoot)) {
+      throw new CheckoutUnavailableException(
+          "No checkout at " + workspaceRoot + " — the self-provision did not complete.");
+    }
     return switch (agentType) {
       case CLAUDE -> probeClaude();
       case KIMI -> probeKimi();

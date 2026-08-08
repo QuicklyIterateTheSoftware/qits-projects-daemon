@@ -7,6 +7,7 @@ import eu.wohlben.qits.projectsdaemon.agents.AgentLaunchService;
 import eu.wohlben.qits.projectsdaemon.agents.AgentMcpScope;
 import eu.wohlben.qits.projectsdaemon.agents.AgentSessionQueryService;
 import eu.wohlben.qits.projectsdaemon.agents.AgentType;
+import eu.wohlben.qits.projectsdaemon.commands.CheckoutUnavailableException;
 import eu.wohlben.qits.projectsdaemon.commands.CommandNotFoundException;
 import eu.wohlben.qits.projectsdaemon.commands.CommandRegistry;
 import eu.wohlben.qits.projectsdaemon.commands.CommandService;
@@ -221,8 +222,10 @@ public class ProjectsApi {
   }
 
   /**
-   * Bind, unless no token is configured. Called from {@link ControlSocket} once the checkout is
-   * provisioned — before that there is nothing to run a command against.
+   * Bind, unless no token is configured. Called from {@link ControlSocket} once the boot provision
+   * has run — <b>whether or not it produced a checkout</b>. A container whose provision failed
+   * keeps running, so the surface has to be reachable for that failure to be visible; the routes
+   * degrade honestly instead of not answering at all.
    */
   public void start() {
     String configured = apiTokenConfig.map(String::trim).orElse("");
@@ -443,6 +446,8 @@ public class ProjectsApi {
       return new Reply(404, ProjectsJson.error(e.getMessage()));
     } catch (InvalidCommandRequestException e) {
       return new Reply(400, ProjectsJson.error(e.getMessage()));
+    } catch (CheckoutUnavailableException e) {
+      return new Reply(503, ProjectsJson.error(e.getMessage()));
     } catch (RuntimeException e) {
       LOG.errorf(e, "projects-daemon agents API failed handling %s", path);
       return new Reply(500, ProjectsJson.error("Internal error"));
@@ -500,6 +505,10 @@ public class ProjectsApi {
       return new Reply(404, ProjectsJson.error(e.getMessage()));
     } catch (InvalidCommandRequestException e) {
       return new Reply(400, ProjectsJson.error(e.getMessage()));
+    } catch (CheckoutUnavailableException e) {
+      // The checkout is missing, so nothing can be launched — a retryable 503 with the reason, not
+      // a 500 that reads as a daemon bug. See the class javadoc on binding after a failed provision.
+      return new Reply(503, ProjectsJson.error(e.getMessage()));
     } catch (RuntimeException e) {
       // The text of an arbitrary exception can carry container paths the caller has no business
       // seeing, so it is logged here and not returned.

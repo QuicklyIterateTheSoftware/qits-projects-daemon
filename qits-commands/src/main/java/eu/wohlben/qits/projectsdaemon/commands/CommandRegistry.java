@@ -2,6 +2,7 @@ package eu.wohlben.qits.projectsdaemon.commands;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -76,7 +77,25 @@ public final class CommandRegistry {
       CommandExitListener exitListener,
       CommandLogWriter logWriter,
       CommandOutputSink... initialSinks) {
+    requireCheckout();
     startSession(commandId, script, environment, exitListener, logWriter, initialSinks);
+  }
+
+  /**
+   * Refuse to spawn when the checkout is missing. Without this the launch reaches {@link
+   * ProcessBuilder#start()} with a working directory that does not exist and fails as an {@code
+   * IOException} the API can only report as "Internal error" — which is what a container whose
+   * self-provision failed would answer to every launch. The directory is never silently dropped
+   * instead: that would run an untrusted script in whatever directory the daemon happens to be in.
+   *
+   * <p>Public because {@code CommandService} asks it <em>before</em> recording the command, so a
+   * refused launch leaves nothing behind; the spawn methods ask again for any other caller.
+   */
+  public void requireCheckout() {
+    if (!Files.isDirectory(workspaceRoot)) {
+      throw new CheckoutUnavailableException(
+          "No checkout at " + workspaceRoot + " — the self-provision did not complete.");
+    }
   }
 
   /**
@@ -95,6 +114,7 @@ public final class CommandRegistry {
       CommandLogWriter logWriter,
       CommandLogReader logReader,
       CommandOutputSink... initialSinks) {
+    requireCheckout();
     Process process;
     try {
       ProcessBuilder builder = shell(script, commandId, environment, false);

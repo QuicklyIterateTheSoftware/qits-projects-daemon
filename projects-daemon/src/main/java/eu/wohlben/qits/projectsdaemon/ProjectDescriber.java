@@ -55,16 +55,21 @@ public final class ProjectDescriber {
 
   /** Run a git command in {@code /workspace} and return its stdout, or "" on any failure. */
   private static String capture(String... argv) {
+    if (!WORKSPACE_DIR.isDirectory()) {
+      // No checkout (a failed self-provision), so there is nothing to read. Running the git command
+      // anyway would run it in the daemon's own working directory and could report an unrelated
+      // repository's HEAD as this project's.
+      return "";
+    }
     try {
       // Discard stderr to the OS null rather than a pipe: reading stdout to completion before
       // draining a stderr pipe deadlocks if git fills the ~64KB stderr buffer (many warnings), and
       // the 10s timeout below is only reached after the stdout read returns. DISCARD removes the
       // pipe entirely, so only stdout is read and there is nothing to deadlock on.
       ProcessBuilder builder =
-          new ProcessBuilder(argv).redirectError(ProcessBuilder.Redirect.DISCARD);
-      if (WORKSPACE_DIR.isDirectory()) {
-        builder.directory(WORKSPACE_DIR);
-      }
+          new ProcessBuilder(argv)
+              .redirectError(ProcessBuilder.Redirect.DISCARD)
+              .directory(WORKSPACE_DIR);
       Process process = builder.start();
       byte[] out = process.getInputStream().readAllBytes();
       if (!process.waitFor(10, TimeUnit.SECONDS)) {
