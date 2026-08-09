@@ -1,12 +1,29 @@
-# A project agent container image: an existing toolchain image with this daemon as its entrypoint.
+# A project agent container image: the workspace toolchain image with this daemon as its entrypoint.
 #
 # This is the shape an agent container actually runs — the toolchain the project's checkout needs,
 # with the daemon as PID 1 — assembled from the two halves that own themselves. The toolchain is not
-# built here and could not be: it is the monolith's `workspace-base` stage, shared with its app
-# image, and reproducing it would put node, maven and a native toolchain in a repo whose rule is
-# that a clone alone builds green with no monorepo and no docker.
+# built here and could not be: reproducing it would put node, maven and a native toolchain in a repo
+# whose rule is that a clone alone builds green with no monorepo and no docker.
 #
-# Build the daemon image first, then layer it:
+# THE BASE IS `qits/workspace-base`, WHICH IS NOW A RELEASED IMAGE. It used to default to
+# `qits/workspace:latest`, the name a hand-built toolchain carried on one machine before the layered
+# workspace image took that name. The toolchain lives in `images/qits-oci-workspace` now and CI
+# publishes it, so the base is a name with a history behind it rather than whatever was last built
+# locally. `qits/workspace` is the wrong base either way: it is the same toolchain with the
+# *workspace* daemon layered on, so taking it would carry a second binary this image never runs.
+#
+# BOTH ARGS ARE UNQUALIFIED AND BOTH SHOULD BE OVERRIDDEN. No registry-qualified reference is
+# portable here — the registry is `qits-platform-artifacts:8080` inside a step container and
+# `localhost:8081` outside — so the defaults name the local convenience tags and anything building
+# for real passes a qualified, version-pinned value, which is what
+# `.config/qits/ci-event-release.yml` does:
+#
+#     docker build -f docker/Dockerfile.projects \
+#       --build-arg BASE=localhost:8081/qits/workspace-base:<version> \
+#       --build-arg DAEMON_IMAGE=localhost:8081/qits/projects-daemon:<version> \
+#       -t localhost:8081/qits/project-agent:<version> .
+#
+# Build the daemon image first when working from local tags:
 #
 #     docker build -t qits/projects-daemon:latest -f docker/Dockerfile .
 #     docker build -t qits/project-agent:native -f docker/Dockerfile.projects .
@@ -17,7 +34,7 @@
 # work on the project's code — build it, test it, run its tooling — and a base that cannot compile
 # the project makes the agent useless at the thing it exists for. Trimming it would also fork the
 # toolchain: two images to keep in step, and a build failure that only reproduces in one of them.
-ARG BASE=qits/workspace:latest
+ARG BASE=qits/workspace-base:latest
 ARG DAEMON_IMAGE=qits/projects-daemon:latest
 
 FROM ${DAEMON_IMAGE} AS daemon

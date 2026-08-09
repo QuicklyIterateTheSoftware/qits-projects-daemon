@@ -13,9 +13,9 @@
 # --- what this image is FOR, because it is not an agent container --------------------------------
 # A project agent container is this binary running as PID 1 inside a toolchain image — debian plus
 # node, maven, a JDK and a native toolchain, because the agent's whole job is to build and run the
-# project's checkout. That toolchain is the qits monolith's `workspace-base` stage, shared with its
-# app image, so it is not this repo's to own and could not be built here: a clone of this repo alone
-# builds and tests green with no monorepo and no docker, which is the rule that shape protects.
+# project's checkout. That toolchain is `qits/workspace-base`, published by `images/qits-oci-workspace`,
+# so it is not this repo's to own and could not be built here: a clone of this repo alone builds and
+# tests green with no monorepo and no docker, which is the rule that shape protects.
 #
 # So this image is the DISTRIBUTION of the binary, and a consumer layers it onto a toolchain — see
 # Dockerfile.projects next to this file.
