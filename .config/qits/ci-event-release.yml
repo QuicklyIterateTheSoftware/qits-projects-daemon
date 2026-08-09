@@ -71,17 +71,21 @@ steps:
       git fetch "$QITS_CI_REPOSITORY_URL" "refs/tags/$version:refs/tags/$version"
       git checkout --detach "$version"
 
-      # BUILD BOTH TAGS BEFORE THE FIRST PUSH, the rule qits-oci's release pipeline states: a build
-      # failure then cannot leave a partial release in the registry. One `docker build` with two
-      # `-t` flags is one build, so the two coordinates are the same bytes by construction rather
-      # than by two builds agreeing. Registry pushes cannot be made atomic, so a network failure
-      # between them can still leave one tag unannounced; qits-ci emits SoftwareRelease only when
-      # every push passes.
+      # THE VERSION IS THE ONLY COORDINATE THIS STEP PUSHES, and the sha coordinate is not missing:
+      # the release lands a commit on main, main's push runs ci-post-receive.yml, and that pushes
+      # `:<sha>` for the very same tree. Publishing both from here as well was tried and is what the
+      # first release of this file failed on — `docker build -t A -t B` reported naming both tags,
+      # then `docker push B` answered "tag does not exist", because BuildKit's exporter does not
+      # reliably leave every alias of a multi-tag build in the local image store. A second
+      # `docker tag` would paper over it, but the honest reading is that the two coordinates have
+      # two owners: post-receive names a build by its commit, and a release names it by its version.
+      #
+      # The build is therefore one build and one push, which is also the shape that cannot leave a
+      # partial release behind — the rule qits-oci's release pipeline states for its five images.
       repository="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/projects-daemon"
-      docker build -t "$repository:$version" -t "$repository:$QITS_CI_SHA" -f docker/Dockerfile .
+      docker build -t "$repository:$version" -f docker/Dockerfile .
 
       docker push "$repository:$version"
-      docker push "$repository:$QITS_CI_SHA"
-      # Best-effort: both tags are already pushed, so a failed local delete is housekeeping, not a
+      # Best-effort: the image is already pushed, so a failed local delete is housekeeping, not a
       # failed release.
-      docker rmi "$repository:$version" "$repository:$QITS_CI_SHA" || true
+      docker rmi "$repository:$version" || true
