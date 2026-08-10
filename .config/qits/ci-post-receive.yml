@@ -15,10 +15,10 @@
 # bare binary and no image at all; that shape does not belong here.
 #
 # WHY THE IMAGE STEP DECLARES `docker: true`: it hands the step the HOST daemon's socket, which is
-# the side the Dockerfile is written for. Its `FROM localhost:8081/…` lines are qits-artifacts'
-# pull-through mirrors of quay.io and registry.access.redhat.com — an address the host daemon
-# resolves and nothing inside this step's container can. The native build's memory is the host
-# daemon's for the same reason.
+# the side the Dockerfile is written for. Its `FROM localhost:8082/…` lines are
+# qits-platform-mirror's pull-through mirrors of quay.io and registry.access.redhat.com — an address
+# the host daemon resolves and nothing inside this step's container can. The native build's memory
+# is the host daemon's for the same reason.
 #
 # No `--network` flag: nothing in this build dials the platform. The reactor declares no
 # `<repositories>`, so the builder stage resolves from Maven Central, and the base images are the

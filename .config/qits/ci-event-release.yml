@@ -48,7 +48,7 @@
 # the step below composes one from environment.
 #
 # THE DAEMON BUILD BELOW IS ci-post-receive.yml's, AND THE TWO MUST STAY MATCHED. That file explains
-# why `docker: true` is what the Dockerfile's `localhost:8081` bases need, why no hand-rolled builder
+# why `docker: true` is what the Dockerfile's `localhost:8082` bases need, why no hand-rolled builder
 # container is involved, and why there is no `--network` flag; this one carries the short form and
 # points there rather than keeping a second copy of the reasoning to drift. The layered build has no
 # counterpart there and never will — see above.
