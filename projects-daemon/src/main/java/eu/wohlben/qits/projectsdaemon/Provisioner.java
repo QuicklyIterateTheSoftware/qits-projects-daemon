@@ -13,6 +13,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
@@ -80,7 +81,12 @@ public final class Provisioner {
    * http://qits-artifacts:8080/artifacts/git}). Blank means "derive it from {@code dialHomeUrl}",
    * which assumes one authority routes every segment — see the class javadoc.
    */
-  public record Env(String projectId, String repoName, String dialHomeUrl, String gitBaseUrl) {}
+  public record Env(
+      String projectId,
+      String repoName,
+      String dialHomeUrl,
+      String gitBaseUrl,
+      String gitAuthorization) {}
 
   private Provisioner() {}
 
@@ -124,14 +130,17 @@ public final class Provisioner {
       String rootUrl = rootUrl(gitBase, env);
       emit.accept(new DaemonLog("INFO", "self-cloning " + rootUrl + " into /workspace"));
       int cloneExit =
-          runStreaming(List.of("git", "clone", rootUrl, WORKSPACE_DIR.getPath()), emit);
+          runStreaming(
+              List.of("git", "clone", rootUrl, WORKSPACE_DIR.getPath()),
+              gitEnvironment(env),
+              emit);
       if (cloneExit != 0) {
         emit.accept(
             new ProvisionFailed(
                 env.projectId(), "git clone exited " + cloneExit + " (" + rootUrl + ")"));
         return false;
       }
-      materializeSubmodules(gitBase, env, ".", 0, emit);
+        materializeSubmodules(gitBase, env, ".", 0, emit);
       emit.accept(new Provisioned(env.projectId(), head()));
       return true;
     } catch (RuntimeException e) {
@@ -264,11 +273,14 @@ public final class Provisioner {
                 "config",
                 "submodule." + sub.name() + ".url",
                 gitBase + "/" + env.projectId() + "/" + basename(url)),
+            Map.of(),
             emit);
       }
       int update =
           runStreaming(
-              List.of("git", "-C", rel, "submodule", "update", "--init", "--", sub.path()), emit);
+              List.of("git", "-C", rel, "submodule", "update", "--init", "--", sub.path()),
+              gitEnvironment(env),
+              emit);
       if (update != 0) {
         emit.accept(
             new DaemonLog(
@@ -354,7 +366,13 @@ public final class Provisioner {
    * CommandExit} — a provision is not a command round-trip.
    */
   static int runStreaming(List<String> argv, Consumer<DaemonMessage> emit) {
+    return runStreaming(argv, Map.of(), emit);
+  }
+
+  static int runStreaming(
+      List<String> argv, Map<String, String> environment, Consumer<DaemonMessage> emit) {
     ProcessBuilder builder = new ProcessBuilder(argv);
+    builder.environment().putAll(environment);
     if (WORKSPACE_DIR.isDirectory()) {
       builder.directory(WORKSPACE_DIR);
     }
@@ -382,6 +400,21 @@ public final class Provisioner {
       process.destroyForcibly();
       return 130;
     }
+  }
+
+  /**
+   * Supplies Git's Authorization header through its process environment, never the command line,
+   * remote URL, or checkout config. Git propagates this config to the fetches it forks for
+   * submodules. An anonymous/developer deployment gets an unchanged empty environment.
+   */
+  static Map<String, String> gitEnvironment(Env env) {
+    if (env.gitAuthorization() == null || env.gitAuthorization().isBlank()) {
+      return Map.of();
+    }
+    return Map.of(
+        "GIT_CONFIG_COUNT", "1",
+        "GIT_CONFIG_KEY_0", "http.extraHeader",
+        "GIT_CONFIG_VALUE_0", "Authorization: " + env.gitAuthorization());
   }
 
   private static void pump(InputStream stream, Stream channel, Consumer<DaemonMessage> emit) {

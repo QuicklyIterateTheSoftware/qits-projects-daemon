@@ -119,6 +119,10 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.projects-daemon.auth-audience")
   Optional<String> authAudience;
 
+  /** The qits-githost audience used only while self-cloning the project checkout. */
+  @ConfigProperty(name = "qits.projects-daemon.git-auth-audience")
+  Optional<String> gitAuthAudience;
+
   // Identity is Optional<String>, not @ConfigProperty(defaultValue = ""): SmallRye treats an empty
   // default as "no value" and fails to resolve a plain String when the env is absent. Resolved to
   // "" below.
@@ -310,10 +314,21 @@ public class ControlSocket {
     if (!provisionStarted.compareAndSet(false, true)) {
       return;
     }
-    Provisioner.Env env =
-        new Provisioner.Env(projectId, repoName, url.get(), gitBaseConfig.orElse(""));
     workers.execute(
         () -> {
+          String gitAuthorization = "";
+          try {
+            gitAuthorization = authorization(gitAuthAudience).join().orElse("");
+          } catch (RuntimeException e) {
+            send(
+                new ProvisionFailed(
+                    projectId, "could not mint git authorization: " + rootMessage(e)));
+            wireCapabilities();
+            return;
+          }
+          Provisioner.Env env =
+              new Provisioner.Env(
+                  projectId, repoName, url.get(), gitBaseConfig.orElse(""), gitAuthorization);
           provisioned = Provisioner.provision(env, this::send);
           wireCapabilities();
         });
@@ -437,7 +452,7 @@ public class ControlSocket {
       LOG.errorf(e, "Malformed qits.projects-daemon.url '%s' — projects-daemon idle.", url.get());
       return; // an unparseable URL will not become parseable on retry; stay alive, stay idle
     }
-    authorization()
+    authorization(authAudience)
         .whenComplete(
             (authorization, failure) ->
                 vertx.runOnContext(
@@ -474,18 +489,23 @@ public class ControlSocket {
    * configuration fails closed and is retried with the socket.
    */
   java.util.concurrent.CompletableFuture<Optional<String>> authorization() {
+    return authorization(authAudience);
+  }
+
+  private java.util.concurrent.CompletableFuture<Optional<String>> authorization(
+      Optional<String> audience) {
     boolean any =
         commissionedClientId.isPresent()
             || commissionedClientSecret.isPresent()
             || authTokenUrl.isPresent()
-            || authAudience.isPresent();
+            || audience.isPresent();
     if (!any) {
       return java.util.concurrent.CompletableFuture.completedFuture(Optional.empty());
     }
     if (commissionedClientId.isEmpty()
         || commissionedClientSecret.isEmpty()
         || authTokenUrl.isEmpty()
-        || authAudience.isEmpty()) {
+        || audience.isEmpty()) {
       return java.util.concurrent.CompletableFuture.failedFuture(
           new IllegalStateException("commissioned dial-home authentication is incomplete"));
     }
@@ -498,7 +518,7 @@ public class ControlSocket {
                       .getBytes(StandardCharsets.UTF_8));
       String form =
           "grant_type=client_credentials&audience="
-              + URLEncoder.encode(authAudience.get(), StandardCharsets.UTF_8);
+              + URLEncoder.encode(audience.get(), StandardCharsets.UTF_8);
       request =
           HttpRequest.newBuilder(URI.create(authTokenUrl.get()))
               .timeout(Duration.ofSeconds(5))
@@ -522,6 +542,14 @@ public class ControlSocket {
               }
               return Optional.of("Bearer " + token);
             });
+  }
+
+  private static String rootMessage(Throwable failure) {
+    Throwable current = failure;
+    while (current.getCause() != null) {
+      current = current.getCause();
+    }
+    return current.getMessage() == null ? current.getClass().getSimpleName() : current.getMessage();
   }
 
   private void onConnected(WebSocket ws) {

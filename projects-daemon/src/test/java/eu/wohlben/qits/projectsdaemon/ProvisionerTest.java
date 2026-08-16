@@ -12,6 +12,7 @@ import eu.wohlben.qits.projectsdaemon.protocol.ProvisionFailed;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -30,7 +31,7 @@ class ProvisionerTest {
   }
 
   private static Env env(String projectId, String repoName, String gitBaseUrl) {
-    return new Env(projectId, repoName, DIAL_HOME, gitBaseUrl);
+    return new Env(projectId, repoName, DIAL_HOME, gitBaseUrl, "");
   }
 
   /** Collects the messages a derivation emits, so a silent fallback fails the test. */
@@ -161,5 +162,18 @@ class ProvisionerTest {
     assertEquals("foo", Provisioner.basename("git@host:o/foo.git"));
     assertEquals("foo", Provisioner.basename("../foo.git"));
     assertEquals("foo", Provisioner.basename("foo"));
+  }
+
+  @Test
+  void gitAuthorizationIsEphemeralProcessConfiguration() {
+    Env authenticated = new Env("proj-1", "qits-qits", DIAL_HOME, "http://git", "Bearer token");
+
+    assertEquals(
+        Map.of(
+            "GIT_CONFIG_COUNT", "1",
+            "GIT_CONFIG_KEY_0", "http.extraHeader",
+            "GIT_CONFIG_VALUE_0", "Authorization: Bearer token"),
+        Provisioner.gitEnvironment(authenticated));
+    assertTrue(Provisioner.gitEnvironment(env("proj-1", "qits-qits")).isEmpty());
   }
 }
