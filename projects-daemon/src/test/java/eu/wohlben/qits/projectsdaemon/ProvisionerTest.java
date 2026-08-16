@@ -96,7 +96,7 @@ class ProvisionerTest {
   @Test
   void theCloneIsAlwaysNameAddressed() {
     assertEquals(
-        "http://qits-projects:8080/artifacts/git/proj-1/qits-qits",
+        "http://qits-projects:8080/artifacts/git/qits-qits",
         Provisioner.rootUrl("http://qits-projects:8080/artifacts/git", env("proj-1", "qits-qits")));
     assertTrue(Provisioner.nameAddressed(env("proj-1", "qits-qits")));
   }
@@ -107,7 +107,7 @@ class ProvisionerTest {
     // its submodule urls are relative, and an id-addressed root would break every one of them. So a
     // missing half fails the provision loudly rather than cloning something that cannot resolve.
     assertFalse(Provisioner.nameAddressed(env("proj-1", "")));
-    assertFalse(Provisioner.nameAddressed(env("", "qits-qits")));
+    assertTrue(Provisioner.nameAddressed(env("", "qits-qits")));
 
     List<DaemonMessage> out = new ArrayList<>();
     assertFalse(Provisioner.provision(env("proj-1", ""), out::add));
@@ -124,22 +124,21 @@ class ProvisionerTest {
   }
 
   /**
-   * The clone url must stay exactly two segments below the base: that length is what decides where
-   * a relative submodule url lands. The {@code /artifacts} prefix is added above the base, so it
-   * shifts the whole thing down and changes nothing below it.
+   * The clone URL is one repository-name segment below the base, so a relative submodule URL lands
+   * on another repository name below the same qits-githost base.
    */
   @Test
   void theArtifactsPrefixDoesNotChangeHowManySegmentsSitBelowTheBase() {
     String base = "http://qits-artifacts:8080/artifacts/git";
 
     assertEquals(
-        "/proj-1/qits-qits",
+        "/qits-qits",
         Provisioner.rootUrl(base, env("proj-1", "qits-qits")).substring(base.length()),
-        "two segments below the base");
+        "one repository-name segment below the base");
     assertEquals(
-        "http://qits-artifacts:8080/artifacts/git/proj-1/sibling",
+        "http://qits-artifacts:8080/artifacts/git/sibling",
         gitRelative(Provisioner.rootUrl(base, env("proj-1", "qits-qits")), "../sibling"),
-        "a relative submodule url still lands on the project sibling, one segment deeper");
+        "a relative submodule url lands on the sibling repository exposed by qits-githost");
   }
 
   @Test

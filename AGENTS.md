@@ -164,8 +164,8 @@ asserted in `AgentLaunchServiceTest`.
 - `docs/openapi.yml` and `OpenApiContractTest`. The surface here is four routes plus two sockets;
   a spec would be a second description of it to keep in step.
 - The id-addressed clone fallback. `Provisioner` is always name-addressed
-  (`<gitBase>/<projectId>/<repoName>`) because a wrapper's submodule urls are relative and an
-  id-addressed root breaks every one of them. Half an identity fails the provision loudly.
+  (`<gitBase>/<repoName>`) because qits-githost exposes repositories directly below `/git` and a
+  wrapper's relative submodule urls resolve to sibling repository names there.
 - `--branch` on the clone. The wrapper is cloned at its default branch.
 
 ## Derivations, and which ones are honest
@@ -200,6 +200,7 @@ warnings; a silent unsound one loses a whole class of misconfiguration.
     QITS_PROJECTS_DAEMON_CLAUDE_MOUNT    shared credential volume, default /claude-home
     QITS_PROJECTS_DAEMON_AUTH_TOKEN_URL  idp token endpoint for authenticated dial-home
     QITS_PROJECTS_DAEMON_AUTH_AUDIENCE   qits-projects' environment client id
+    QITS_PROJECTS_DAEMON_GIT_AUTH_AUDIENCE qits-githost's environment client id
     QITS_REPOSITORY_MCP_URL              the one MCP server a launch attaches; absent ⇒ derived
     QITS_COMMISSIONED_CLIENT_ID          this container's idp client; absent ⇒ anonymous dev dial
     QITS_COMMISSIONED_CLIENT_SECRET      its one-time secret

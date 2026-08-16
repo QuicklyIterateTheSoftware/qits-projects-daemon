@@ -26,12 +26,10 @@ import java.util.function.Consumer;
  * <p>Framework-free (no Vert.x, no CDI, no JGit — native-image lean), so it forks the {@code git}
  * CLI via {@link ProcessBuilder} and unit-tests directly against a collecting {@code Consumer}.
  *
- * <p><b>The clone is always name-addressed</b>: {@code <gitBase>/<projectId>/<repoName>}. That is
+ * <p><b>The clone is always name-addressed</b>: {@code <gitBase>/<repoName>}. That is
  * the whole point of cloning a wrapper — its committed submodule urls are relative, so they resolve
- * natively against the project siblings the git host serves under the same {@code <projectId>}
- * segment. The workspace daemon carried an id-addressed fallback ({@code <gitBase>/<repositoryId>})
- * for repositories reached outside a project; a project agent has no such case, and an
- * id-addressed root would break every relative submodule under it.
+ * natively against sibling names below the git host's {@code /git} base. The project id identifies
+ * the daemon and its control channel; it is not part of qits-githost's repository route.
  *
  * <p>Submodules are discovered from the checkout's own {@code .gitmodules} in a bounded,
  * depth-capped walk (the daemon has no database). A submodule that cannot be fetched is skipped
@@ -54,12 +52,9 @@ import java.util.function.Consumer;
  * DaemonMcpEndpoints}, where both ends are qits-projects.
  *
  * <p>The extra {@code /artifacts} segment does <b>not</b> disturb relative submodule resolution.
- * Git treats the superproject's remote as a <em>directory</em> and {@code ../} drops one whole
- * segment (its own rule, not RFC 3986 — URI resolution would discard {@code <repoName>} as a
- * filename first and land a level too high). So {@code ../sibling} against {@code
- * …/artifacts/git/<projectId>/<repoName>} yields {@code …/artifacts/git/<projectId>/sibling}. What
- * must be preserved is the <em>length</em> below the base — two segments — and a prefix added above
- * the base preserves it.
+ * Git treats the superproject's remote as a <em>directory</em> and {@code ../} replaces the
+ * repository-name segment with its sibling. So {@code ../sibling} against {@code
+ * …/artifacts/git/<repoName>} yields {@code …/artifacts/git/sibling}.
  */
 public final class Provisioner {
 
@@ -103,9 +98,8 @@ public final class Provisioner {
         emit.accept(
             new ProvisionFailed(
                 env.projectId(),
-                "no clone url: both QITS_PROJECTS_DAEMON_PROJECT_ID and"
-                    + " QITS_PROJECTS_DAEMON_REPO_NAME are required, because the wrapper is always"
-                    + " cloned name-addressed (relative submodule urls resolve against it)"));
+                "no clone url: QITS_PROJECTS_DAEMON_REPO_NAME is required, because the wrapper is"
+                    + " cloned by its qits-githost repository name"));
         return false;
       }
       String gitBase = gitBase(env, emit);
@@ -206,17 +200,14 @@ public final class Provisioner {
     return out;
   }
 
-  /** The name-addressed clone url, {@code <gitBase>/<projectId>/<repoName>}. */
+  /** The name-addressed clone url, {@code <gitBase>/<repoName>}. */
   static String rootUrl(String gitBase, Env env) {
-    return gitBase + "/" + env.projectId() + "/" + env.repoName();
+    return gitBase + "/" + env.repoName();
   }
 
-  /** Whether both halves of the name-addressed route were injected. */
+  /** Whether the qits-githost repository name was injected. */
   static boolean nameAddressed(Env env) {
-    return env.projectId() != null
-        && !env.projectId().isBlank()
-        && env.repoName() != null
-        && !env.repoName().isBlank();
+    return env.repoName() != null && !env.repoName().isBlank();
   }
 
   /**
@@ -272,7 +263,7 @@ public final class Provisioner {
                 rel,
                 "config",
                 "submodule." + sub.name() + ".url",
-                gitBase + "/" + env.projectId() + "/" + basename(url)),
+                gitBase + "/" + basename(url)),
             Map.of(),
             emit);
       }

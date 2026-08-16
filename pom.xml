@@ -12,7 +12,7 @@
          disk. -->
     <groupId>eu.wohlben</groupId>
     <artifactId>qits</artifactId>
-    <version>2026.816.131214</version>
+    <version>2026.816.135228</version>
     <packaging>pom</packaging>
 
     <modules>
