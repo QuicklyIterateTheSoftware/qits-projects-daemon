@@ -198,7 +198,11 @@ warnings; a silent unsound one loses a whole class of misconfiguration.
     QITS_PROJECTS_DAEMON_API_PORT        default 13338
     QITS_PROJECTS_DAEMON_HOOKS_PORT      default 13337
     QITS_PROJECTS_DAEMON_CLAUDE_MOUNT    shared credential volume, default /claude-home
+    QITS_PROJECTS_DAEMON_AUTH_TOKEN_URL  idp token endpoint for authenticated dial-home
+    QITS_PROJECTS_DAEMON_AUTH_AUDIENCE   qits-projects' environment client id
     QITS_REPOSITORY_MCP_URL              the one MCP server a launch attaches; absent ⇒ derived
+    QITS_COMMISSIONED_CLIENT_ID          this container's idp client; absent ⇒ anonymous dev dial
+    QITS_COMMISSIONED_CLIENT_SECRET      its one-time secret
 
 `QITS_REPOSITORY_MCP_URL` is the odd name out — no `QITS_PROJECTS_DAEMON_` prefix — because it is
 the existing `qits.repository-mcp.url` key, the spelling the workspace daemon uses for the same

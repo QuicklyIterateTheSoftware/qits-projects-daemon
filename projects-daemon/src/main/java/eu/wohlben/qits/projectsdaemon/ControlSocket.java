@@ -37,6 +37,13 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.io.File;
 import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.Base64;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -95,6 +102,22 @@ public class ControlSocket {
    */
   @ConfigProperty(name = "qits.projects-daemon.url")
   Optional<String> url;
+
+  /** The per-container IdP client commissioned by qits-projects. */
+  @ConfigProperty(name = "qits.commissioned-client-id")
+  Optional<String> commissionedClientId;
+
+  /** Its one-time secret, paired with {@link #commissionedClientId}. */
+  @ConfigProperty(name = "qits.commissioned-client-secret")
+  Optional<String> commissionedClientSecret;
+
+  /** Where that client exchanges its pair for the control socket's bearer token. */
+  @ConfigProperty(name = "qits.projects-daemon.auth-token-url")
+  Optional<String> authTokenUrl;
+
+  /** The qits-projects audience required by the protected control socket. */
+  @ConfigProperty(name = "qits.projects-daemon.auth-audience")
+  Optional<String> authAudience;
 
   // Identity is Optional<String>, not @ConfigProperty(defaultValue = ""): SmallRye treats an empty
   // default as "no value" and fails to resolve a plain String when the env is absent. Resolved to
@@ -181,6 +204,8 @@ public class ControlSocket {
           });
 
   private volatile WebSocketClient client;
+  private final HttpClient tokenClient =
+      HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
   private volatile WebSocket socket;
   private volatile Context socketContext;
 
@@ -412,9 +437,27 @@ public class ControlSocket {
       LOG.errorf(e, "Malformed qits.projects-daemon.url '%s' — projects-daemon idle.", url.get());
       return; // an unparseable URL will not become parseable on retry; stay alive, stay idle
     }
+    authorization()
+        .whenComplete(
+            (authorization, failure) ->
+                vertx.runOnContext(
+                    ignored -> {
+                      if (failure != null) {
+                        LOG.debugf(
+                            "projects-daemon could not mint its dial-home token (attempt %d): %s",
+                            attempt, failure.getMessage());
+                        reconnect(attempt);
+                        return;
+                      }
+                      connect(uri, attempt, authorization);
+                    }));
+  }
+
+  private void connect(URI uri, int attempt, Optional<String> authorization) {
     int port = uri.getPort() != -1 ? uri.getPort() : 80;
     WebSocketConnectOptions options =
         new WebSocketConnectOptions().setHost(uri.getHost()).setPort(port).setURI(uri.getRawPath());
+    authorization.ifPresent(value -> options.addHeader("Authorization", value));
     client
         .connect(options)
         .onSuccess(this::onConnected)
@@ -422,6 +465,62 @@ public class ControlSocket {
             t -> {
               LOG.debugf("projects-daemon dial-home failed (attempt %d): %s", attempt, t.getMessage());
               reconnect(attempt);
+            });
+  }
+
+  /**
+   * Mint the commissioned container's machine token without blocking the Vert.x event loop.
+   * Absent configuration keeps the clone-alone/developer topology anonymous; a partial
+   * configuration fails closed and is retried with the socket.
+   */
+  java.util.concurrent.CompletableFuture<Optional<String>> authorization() {
+    boolean any =
+        commissionedClientId.isPresent()
+            || commissionedClientSecret.isPresent()
+            || authTokenUrl.isPresent()
+            || authAudience.isPresent();
+    if (!any) {
+      return java.util.concurrent.CompletableFuture.completedFuture(Optional.empty());
+    }
+    if (commissionedClientId.isEmpty()
+        || commissionedClientSecret.isEmpty()
+        || authTokenUrl.isEmpty()
+        || authAudience.isEmpty()) {
+      return java.util.concurrent.CompletableFuture.failedFuture(
+          new IllegalStateException("commissioned dial-home authentication is incomplete"));
+    }
+    HttpRequest request;
+    try {
+      String basic =
+          Base64.getEncoder()
+              .encodeToString(
+                  (commissionedClientId.get() + ":" + commissionedClientSecret.get())
+                      .getBytes(StandardCharsets.UTF_8));
+      String form =
+          "grant_type=client_credentials&audience="
+              + URLEncoder.encode(authAudience.get(), StandardCharsets.UTF_8);
+      request =
+          HttpRequest.newBuilder(URI.create(authTokenUrl.get()))
+              .timeout(Duration.ofSeconds(5))
+              .header("Authorization", "Basic " + basic)
+              .header("Content-Type", "application/x-www-form-urlencoded")
+              .POST(HttpRequest.BodyPublishers.ofString(form))
+              .build();
+    } catch (RuntimeException e) {
+      return java.util.concurrent.CompletableFuture.failedFuture(e);
+    }
+    return tokenClient
+        .sendAsync(request, HttpResponse.BodyHandlers.ofString())
+        .thenApply(
+            response -> {
+              if (response.statusCode() / 100 != 2) {
+                throw new IllegalStateException("idp answered " + response.statusCode());
+              }
+              String token = new JsonObject(response.body()).getString("access_token");
+              if (token == null || token.isBlank()) {
+                throw new IllegalStateException("idp answered without an access token");
+              }
+              return Optional.of("Bearer " + token);
             });
   }
 
