@@ -26,35 +26,38 @@ import java.util.function.Consumer;
  * <p>Framework-free (no Vert.x, no CDI, no JGit — native-image lean), so it forks the {@code git}
  * CLI via {@link ProcessBuilder} and unit-tests directly against a collecting {@code Consumer}.
  *
- * <p><b>The clone is always name-addressed</b>: {@code <gitBase>/<repoName>}. That is
- * the whole point of cloning a wrapper — its committed submodule urls are relative, so they resolve
- * natively against sibling names below the git host's {@code /git} base. The project id identifies
- * the daemon and its control channel; it is not part of qits-githost's repository route.
+ * <p><b>The clone is project-scoped</b>: {@code <gitBase>/<projectId>/<repoName>}, qits-githost's
+ * one public repository address. That is the whole point of cloning a wrapper — its committed
+ * submodule urls are relative, so they resolve natively against the sibling names below the same
+ * project segment. The flat {@code <gitBase>/<repoName>} this used to build addressed a repository
+ * only while a storage id was its name, which collides globally the moment a second project holds a
+ * repository of the same name.
  *
  * <p>Submodules are discovered from the checkout's own {@code .gitmodules} in a bounded,
  * depth-capped walk (the daemon has no database). A submodule that cannot be fetched is skipped
  * with a warning rather than failing the whole provision — a wrapper naming a repository the
  * project never imported must not cost the agent its container. An <b>absolute</b> committed url is
- * redirected to the name-addressed sibling by basename, so a wrapper that pins full urls still
- * resolves offline.
+ * redirected to the sibling below this project's segment by basename, so a wrapper that pins full
+ * urls still resolves offline.
  *
  * <p>An existing checkout (a reconnect after a restart) is never re-cloned: it may hold unpushed
  * commits. The submodule walk still re-runs, because a prior boot may have died between the root
  * clone and materialization, and {@code submodule update --init} is a no-op on submodules already
  * present.
  *
- * <p><b>Where the git base comes from.</b> {@code qits.projects-daemon.git-base} names the git host
- * outright ({@code QITS_PROJECTS_DAEMON_GIT_BASE}). Unset, it is derived from the dial-home
- * authority plus {@code /artifacts/git} — which is a guess about a <em>different</em> service
- * (qits-artifacts serves git, qits-projects serves the control socket), so taking the fallback
- * emits a {@link DaemonLog} {@code WARN} rather than silently cloning from whatever answers. This
- * is the one derivation in this daemon that is not provably correct; contrast {@link
- * DaemonMcpEndpoints}, where both ends are qits-projects.
+ * <p><b>The git base must be injected.</b> {@code qits.projects-daemon.git-base} names the git host
+ * outright ({@code QITS_PROJECTS_DAEMON_GIT_BASE}), and qits-projects sets it on every container it
+ * creates. Unset used to derive the dial-home authority plus {@code /artifacts/git}, with a {@code
+ * WARN}: a guess about a <em>different</em> service, and since the byte-plane split about a host
+ * that serves no git at all. That bought nothing over naming the missing key, so it is gone — unset
+ * now emits the {@link DaemonLog} {@code WARN} and refuses to clone. Contrast {@link
+ * DaemonMcpEndpoints}, whose derivation stays because both ends really are qits-projects.
  *
- * <p>The extra {@code /artifacts} segment does <b>not</b> disturb relative submodule resolution.
- * Git treats the superproject's remote as a <em>directory</em> and {@code ../} replaces the
+ * <p>Whatever prefix the base carries does <b>not</b> disturb relative submodule resolution. Git
+ * treats the superproject's remote as a <em>directory</em> and {@code ../} replaces the
  * repository-name segment with its sibling. So {@code ../sibling} against {@code
- * …/artifacts/git/<repoName>} yields {@code …/artifacts/git/sibling}.
+ * …/git/<projectId>/<repoName>} yields {@code …/git/<projectId>/sibling}: the same project's
+ * sibling.
  */
 public final class Provisioner {
 
@@ -73,15 +76,11 @@ public final class Provisioner {
    * The identity and coordinates the daemon self-provisions from (its injected env).
    *
    * <p>{@code gitBaseUrl} is the git base ({@code qits.projects-daemon.git-base}, e.g. {@code
-   * http://qits-artifacts:8080/artifacts/git}). Blank means "derive it from {@code dialHomeUrl}",
-   * which assumes one authority routes every segment — see the class javadoc.
+   * http://qits-githost:8080/git}). Blank means the daemon cannot clone — there is no derivation
+   * left to fall back to (see the class javadoc).
    */
   public record Env(
-      String projectId,
-      String repoName,
-      String dialHomeUrl,
-      String gitBaseUrl,
-      String gitAuthorization) {}
+      String projectId, String repoName, String gitBaseUrl, String gitAuthorization) {}
 
   private Provisioner() {}
 
@@ -107,9 +106,8 @@ public final class Provisioner {
         emit.accept(
             new ProvisionFailed(
                 env.projectId(),
-                "no git host: qits.projects-daemon.git-base is unset and none could be derived from"
-                    + " the dial-home url: "
-                    + env.dialHomeUrl()));
+                "no git host: qits.projects-daemon.git-base (QITS_PROJECTS_DAEMON_GIT_BASE) is"
+                    + " unset"));
         return false;
       }
       if (new File(WORKSPACE_DIR, ".git").exists()) {
@@ -144,52 +142,28 @@ public final class Provisioner {
   }
 
   /**
-   * The git base every clone url is built on: the injected {@code qits.projects-daemon.git-base}
-   * when one was supplied, else {@link #derivedGitBase} — announced as a {@code WARN} so a clone
-   * against the wrong host reads as a stated assumption rather than a bare connection error.
-   * {@code null} when neither is available (the caller reports {@link ProvisionFailed}).
+   * The git base every clone url is built on: the injected {@code qits.projects-daemon.git-base}, or
+   * {@code null} when none was supplied — announced as a {@code WARN} and reported by the caller as
+   * {@link ProvisionFailed}.
+   *
+   * <p>The fallback that used to sit here derived the dial-home authority plus {@code
+   * /artifacts/git}. qits-projects states the base on every container it creates, so it was already
+   * dead in a deployed daemon; and the host it guessed at stopped serving git at the byte-plane
+   * split, so where it did fire it only turned a missing setting into a connection error against
+   * the wrong service.
    */
   static String gitBase(Env env, Consumer<DaemonMessage> emit) {
     String configured = env.gitBaseUrl();
     if (configured != null && !configured.isBlank()) {
       return trimTrailingSlash(configured.trim());
     }
-    String derived = derivedGitBase(env.dialHomeUrl());
-    if (derived != null) {
-      emit.accept(
-          new DaemonLog(
-              "WARN",
-              "No qits.projects-daemon.git-base injected — cloning from "
-                  + derived
-                  + ", derived from the control-socket authority. That is only right where one"
-                  + " authority routes every segment; the git host is qits-artifacts, the control"
-                  + " socket is qits-projects."));
-    }
-    return derived;
-  }
-
-  /**
-   * {@code ws://host:port/…} → {@code http://host:port/artifacts/git} (or {@code wss}→{@code
-   * https}). Authority only: the dial-home path is qits-projects' control socket and says nothing
-   * about where git is served. {@code /artifacts/git} is qits-artifacts' own path — served under
-   * that prefix whether it is reached through the gateway or dialled directly — so the derivation
-   * is right about the path and guessing about the host.
-   */
-  static String derivedGitBase(String dialHomeUrl) {
-    if (dialHomeUrl == null || dialHomeUrl.isBlank()) {
-      return null;
-    }
-    try {
-      java.net.URI uri = java.net.URI.create(dialHomeUrl);
-      if (uri.getHost() == null) {
-        return null;
-      }
-      String scheme = "wss".equalsIgnoreCase(uri.getScheme()) ? "https" : "http";
-      String authority = uri.getHost() + (uri.getPort() != -1 ? ":" + uri.getPort() : "");
-      return scheme + "://" + authority + "/artifacts/git";
-    } catch (RuntimeException e) {
-      return null;
-    }
+    emit.accept(
+        new DaemonLog(
+            "WARN",
+            "No qits.projects-daemon.git-base injected — refusing to self-clone. The git host is"
+                + " qits-githost and its address is not derivable from the control socket's"
+                + " (qits-projects'); whoever creates this container has to state it."));
+    return null;
   }
 
   private static String trimTrailingSlash(String base) {
@@ -200,9 +174,37 @@ public final class Provisioner {
     return out;
   }
 
-  /** The name-addressed clone url, {@code <gitBase>/<repoName>}. */
+  /**
+   * The project-scoped clone url, {@code <gitBase>/<projectId>/<repoName>}.
+   *
+   * <p>A container always knows its project — qits-projects injects {@code
+   * QITS_PROJECTS_DAEMON_PROJECT_ID} on every one it creates, and the id is the control socket's own
+   * path segment. A blank one therefore means a hand-run daemon, not a deployment, and it keeps the
+   * flat form the git host served while storage ids were names. Cloning {@code
+   * <gitBase>//<repoName>} instead would fail somewhere far from the empty variable that caused it.
+   */
   static String rootUrl(String gitBase, Env env) {
-    return gitBase + "/" + env.repoName();
+    if (!projectScoped(env)) {
+      return gitBase + "/" + env.repoName();
+    }
+    return gitBase + "/" + env.projectId() + "/" + env.repoName();
+  }
+
+  /**
+   * Where a submodule's committed url is pointed instead: the sibling repository of the same name,
+   * below this checkout's own scheme. A project's repositories are siblings <em>under the project
+   * segment</em>.
+   */
+  static String siblingUrl(String gitBase, Env env, String submoduleUrl) {
+    String sibling = basename(submoduleUrl);
+    return projectScoped(env)
+        ? gitBase + "/" + env.projectId() + "/" + sibling
+        : gitBase + "/" + sibling;
+  }
+
+  /** Whether the project id — the first segment of the public repository address — was injected. */
+  static boolean projectScoped(Env env) {
+    return env.projectId() != null && !env.projectId().isBlank();
   }
 
   /** Whether the qits-githost repository name was injected. */
@@ -212,10 +214,10 @@ public final class Provisioner {
 
   /**
    * Materialize one level of the checkout's submodules (from its committed {@code .gitmodules})
-   * then descend. Relative urls resolve natively; an absolute url is redirected to the
-   * name-addressed sibling by basename. A submodule whose gitlink is not on this branch is skipped;
-   * a submodule whose update fails (never imported, so no served sibling) is skipped with a warning
-   * rather than failing the provision.
+   * then descend. Relative urls resolve natively; an absolute url is redirected by basename to the
+   * sibling under this project's segment. A submodule whose gitlink is not on this branch is
+   * skipped; a submodule whose update fails (never imported, so no served sibling) is skipped with a
+   * warning rather than failing the provision.
    *
    * <p><b>Known limitation.</b> The daemon has no database, so it materializes every submodule the
    * wrapper's {@code .gitmodules} names rather than a curated closure. Usually harmless — an
@@ -253,8 +255,8 @@ public final class Provisioner {
                   "git", "config", "--file", gitmodules, "--get", "submodule." + sub.name() + ".url"));
       String url = committedUrl.exitCode() == 0 ? committedUrl.stdout().trim() : "";
       boolean relative = url.isEmpty() || url.startsWith("./") || url.startsWith("../");
-      // A relative url resolves natively against the name-addressed origin; only an absolute url
-      // needs redirecting to the name-addressed sibling to stay offline.
+      // A relative url resolves natively against the project-scoped origin; only an absolute url
+      // needs redirecting to the sibling below this project's segment to stay offline.
       if (!relative) {
         runStreaming(
             List.of(
@@ -263,7 +265,7 @@ public final class Provisioner {
                 rel,
                 "config",
                 "submodule." + sub.name() + ".url",
-                gitBase + "/" + basename(url)),
+                siblingUrl(gitBase, env, url)),
             Map.of(),
             emit);
       }

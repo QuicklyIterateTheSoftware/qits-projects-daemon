@@ -133,8 +133,9 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.projects-daemon.repo-name")
   Optional<String> repoNameConfig;
 
-  // The git host the self-clone reads from. Unset ⇒ the Provisioner derives it from the dial-home
-  // authority and says so in a WARN, because that is a guess about a different service.
+  // The git host the self-clone reads from: qits-githost, serving /git/<projectId>/<repoName>.
+  // Unset ⇒ the Provisioner refuses to clone and says so, because the git host's address is not
+  // derivable from this container's own (see Provisioner's javadoc).
   @ConfigProperty(name = "qits.projects-daemon.git-base")
   Optional<String> gitBaseConfig;
 
@@ -328,7 +329,7 @@ public class ControlSocket {
           }
           Provisioner.Env env =
               new Provisioner.Env(
-                  projectId, repoName, url.get(), gitBaseConfig.orElse(""), gitAuthorization);
+                  projectId, repoName, gitBaseConfig.orElse(""), gitAuthorization);
           provisioned = Provisioner.provision(env, this::send);
           wireCapabilities();
         });

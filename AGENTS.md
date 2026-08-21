@@ -164,14 +164,13 @@ asserted in `AgentLaunchServiceTest`.
 - `docs/openapi.yml` and `OpenApiContractTest`. The surface here is four routes plus two sockets;
   a spec would be a second description of it to keep in step.
 - The id-addressed clone fallback. `Provisioner` is always name-addressed
-  (`<gitBase>/<repoName>`) because qits-githost exposes repositories directly below `/git` and a
-  wrapper's relative submodule urls resolve to sibling repository names there.
+  (`<gitBase>/<projectId>/<repoName>`) because that is qits-githost's public repository address and
+  a wrapper's relative submodule urls resolve to sibling names below the same project segment.
 - `--branch` on the clone. The wrapper is cloned at its default branch.
 
 ## Derivations, and which ones are honest
 
-Two addresses are derived from the one url the container is handed. They are not equally sound, and
-the code says so differently.
+One address is derived from the url the container is handed; the other used to be and no longer is.
 
 - **The MCP server** (`DaemonMcpEndpoints`): the control socket and the `repository` MCP server are
   both **qits-projects**. Same service, same authority — the derivation is a property of the
@@ -180,19 +179,22 @@ the code says so differently.
   the day the MCP server stops being co-located. The derivation stays so a container created before
   that env, or a daemon run by hand, still works.
 - **The git host** (`Provisioner`): the control socket is qits-projects, the git host is
-  qits-artifacts. Different services, so `<authority>/artifacts/git` only holds where one authority
-  routes every segment. Taking that fallback emits a `DaemonLog` WARN naming the assumption.
-  `QITS_PROJECTS_DAEMON_GIT_BASE` states it outright.
+  qits-githost. Different services, so there is nothing to derive. `QITS_PROJECTS_DAEMON_GIT_BASE`
+  is stated on every container qits-projects creates, and unset now means a `DaemonLog` WARN plus
+  `ProvisionFailed` — no clone. The old fallback (`<authority>/artifacts/git`) named the pre-split
+  host, which serves no git at all, so it could only convert a missing setting into a connection
+  error against the wrong service.
 
 Keep that distinction if either moves. A warning on a sound derivation trains people to ignore
-warnings; a silent unsound one loses a whole class of misconfiguration.
+warnings; a silent unsound one loses a whole class of misconfiguration; an address nothing can
+derive fails at the boundary instead of far from it.
 
 ## Environment
 
     QITS_PROJECTS_DAEMON_URL             ws://<host>/projects/daemon/<projectId>; absent ⇒ idle, container stays up
-    QITS_PROJECTS_DAEMON_PROJECT_ID      the project served
+    QITS_PROJECTS_DAEMON_PROJECT_ID      the project served, and the clone url's first segment
     QITS_PROJECTS_DAEMON_REPO_NAME       the wrapper repository cloned into /workspace
-    QITS_PROJECTS_DAEMON_GIT_BASE        git host; absent ⇒ derived with a WARN
+    QITS_PROJECTS_DAEMON_GIT_BASE        git host; absent ⇒ a WARN and NO clone (nothing to derive)
     QITS_PROJECTS_DAEMON_API_TOKEN       bearer for the loopback API; absent ⇒ the API DOES NOT BIND
     QITS_PROJECTS_DAEMON_API_BASE_PATH   /projects/container/<projectId>/; absent ⇒ nothing fronts the daemon
     QITS_PROJECTS_DAEMON_API_PORT        default 13338
