@@ -32,9 +32,9 @@ spawns.
 
 ## The vendoring contract
 
-`projects-daemon-protocol` is a **source module, vendored** into qits-projects — not a published
-jar. qits-projects copies these sources into its own tree so both ends encode and decode against
-one mapping.
+`projects-daemon-protocol` is a **source module, vendored** into qits-projects-service — not a
+published jar. That repository copies these sources into its own tree so both ends encode and
+decode against one mapping.
 
 Nothing at build time notices when the two copies drift. **`DaemonCodecTest` is the drift
 detector**, and it only works if it is vendored alongside the sources and run on both sides. A
@@ -42,7 +42,7 @@ change to the protocol is therefore three edits, in this order:
 
 1. the record and the `DaemonProtocol` constants here,
 2. `DaemonCodecTest` here, green,
-3. the same files vendored into qits-projects, its suite green.
+3. the same files vendored into qits-projects-service, its suite green.
 
 Bump `CAPABILITY_VERSION` whenever the backend must branch on the change. It starts at **1**, not
 at the workspace daemon's 4: the two protocols share a shape and a lineage but not a namespace,
