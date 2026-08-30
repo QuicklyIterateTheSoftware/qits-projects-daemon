@@ -32,7 +32,7 @@
 #
 # ci-event-upstream-oci-workspace.yml IS WHAT MOVES THAT PIN, and ci-post-receive.yml's maintenance
 # leg is what turns the moved pin into a release. The loop closes with nobody in it: the toolchain
-# releases, the pin bumps onto `maintenance/qits-oci-workspace`, that push releases this repository,
+# releases, the pin bumps onto `maintenance/qits-workspace-oci`, that push releases this repository,
 # and this pipeline republishes `qits/project-agent` on the new base.
 #
 # `artifacts:` IS A DECLARATION, NOT A REPORT. qits-ci never learns how to publish anything — the

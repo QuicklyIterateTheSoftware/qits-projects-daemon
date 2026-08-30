@@ -27,7 +27,10 @@
 # race, and switching to it is a one-line change to the two lines below.
 event: SCMRelease
 when:
-  - repository: { exact: qits-oci-workspace }
+  # The upstream's new name. `repository` on SCMRelease is the PUBLIC name, and this train is the
+  # measurement: it followed 2026.829.153130 through this field after the identity cutover. So the
+  # match dies the moment the upstream is renamed and nothing here says why.
+  - repository: { exact: qits-workspace-oci }
 steps:
     # ci-base: git to commit and push, jq to read the payload. No docker socket — this step builds
     # nothing, and the image it is bumping towards is not pulled here.
@@ -63,5 +66,5 @@ steps:
       git diff --cached --quiet && exit 0
 
       git -c user.name="qits release train" -c user.email="release-train@qits.local" commit -q \
-        -m "bump(qits-oci-workspace@$version): follow the workspace toolchain"
-      git push --force "$QITS_CI_REPOSITORY_URL" HEAD:refs/heads/maintenance/qits-oci-workspace
+        -m "bump(qits-workspace-oci@$version): follow the workspace toolchain"
+      git push --force "$QITS_CI_REPOSITORY_URL" HEAD:refs/heads/maintenance/qits-workspace-oci
