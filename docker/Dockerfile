@@ -55,7 +55,35 @@ COPY . .
 # Tests are skipped because they are not skippable HERE: CommandRegistryTest spawns real PTYs and
 # the socket suites bind real ports. `./mvnw verify` on a clone is the gate for those.
 RUN ./mvnw -B -ntp -pl projects-daemon -am package -Dnative -DskipTests \
-      -Dquarkus.native.native-image-xmx=4g
+      -Dquarkus.native.native-image-xmx=4g \
+      org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeBom \
+      -DoutputFormat=json -DoutputName=sbom -DschemaVersion=1.6 \
+      -Dcyclonedx.skipNotDeployed=false
+# makeBom RIDES ON THE INVOCATION ABOVE rather than getting a second one: a second `./mvnw` would be
+# a second layer on top of a native compile, and a re-resolve of the same reactor to produce a
+# document the first run already had the model for. One RUN, one layer, one truth.
+#
+# cyclonedx.skipNotDeployed=false is LOAD-BEARING, measured in qits-artifacts-service on its first
+# release: `projects-daemon` is <packaging>quarkus</packaging> and ships as this image rather than
+# as a jar, so it skips maven-deploy — and the plugin SKIPS deploy-skipping modules by default, with
+# a green build and one INFO line. The sbom stage's COPY then fails on a file nothing wrote. The
+# spelling matters too: a bare -DskipNotDeployed=false is silently ignored, and only the
+# cyclonedx.-prefixed property reaches the plugin.
+
+# --- sbom -----------------------------------------------------------------------------------------
+# The daemon module's CycloneDX document, exported so the release step can PUT it to the platform's
+# SBOM store. A stage rather than a layer of the runtime image, and BEFORE the runtime stage on
+# purpose: the last stage is what a plain `docker build` builds, and that must stay the image.
+# `.config/qits/ci-event-release.yml` reaches this one with `--target sbom --output type=local`
+# using the SAME secrets as the image build, so every layer above is a cache hit and the export
+# costs seconds rather than a second native compile.
+#
+# THIS DOCUMENT IS THE DAEMON'S, NOT THE AGENT'S. Dockerfile.projects layers this binary onto the
+# released toolchain, and what a consumer of THAT image needs to know is which two published images
+# it is made of — so the release step writes the agent's document from the two references it passed,
+# rather than from a Maven closure that would describe only half of it.
+FROM scratch AS sbom
+COPY --from=build /src/projects-daemon/target/sbom.json /sbom.json
 
 # --- runtime --------------------------------------------------------------------------------------
 # `mirror.dev.localhost:8080/redhat/…` is the same mirror, pointed at registry.access.redhat.com.
