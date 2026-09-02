@@ -196,3 +196,67 @@ steps:
       # which is the race that broke the release of 2026-08-11. It is worse here than elsewhere:
       # the daemon image is a build input to the layered one above, so a delete can pull content
       # out from under a run that is still reading it.
+
+      # --- the SBOMs ------------------------------------------------------------------------------
+      # TWO DECLARED ARTIFACTS, TWO DOCUMENTS. `artifacts:` above names two images and qits-ci
+      # announces one `SoftwareRelease` per entry, so a version of either that a consumer can be
+      # told about and cannot audit is exactly the gap this closes. Both go up AFTER both pushes and
+      # BEFORE this step exits green: qits-ci announces only for a green run, so ordering is the
+      # whole guarantee, and a failed PUT fails the release ON PURPOSE — the store being down is not
+      # a reason to announce a version nobody can audit.
+      #
+      # The store is a sibling path of the npm registry inside the qits-artifacts deployment, so its
+      # root is DERIVED from $QITS_NPM_REGISTRY_URL — the qits-net alias every step carries. NOT
+      # from $QITS_REGISTRY, which is the host-published name the docker daemon pushes through: from
+      # in here it answers curl with an instant connection refusal, and the edge in front of it 401s
+      # a sessionless write besides (measured twice on 2026.902.53027). Each path names a DECLARED
+      # artifact identity verbatim, because (packageType, packageName, version) is how the
+      # SoftwareRelease consumer will ask for it.
+      sbom_base="${QITS_NPM_REGISTRY_URL%%/artifacts/*}/artifacts/sboms"
+
+      # THE DAEMON IMAGE'S DOCUMENT IS ITS MAVEN CLOSURE, and it comes out of the same Dockerfile
+      # that built it: `--target sbom` reaches a `FROM scratch` stage holding the document the
+      # builder's mvnw run already wrote. Secrets are BYTE-IDENTICAL to the image build above and
+      # there is still no `--network` flag, so every layer is a cache hit and this costs seconds
+      # rather than a second native compile.
+      docker build --target sbom --output type=local,dest=.sbom \
+        --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
+        --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
+        -f docker/Dockerfile .
+      curl -fsS -X PUT -H 'Content-Type: application/vnd.cyclonedx+json' \
+        --data-binary @.sbom/sbom.json \
+        "$sbom_base/docker/qits/projects-daemon/-/$version"
+
+      # THE AGENT IMAGE'S DOCUMENT IS ITS TWO HALVES, and there is nothing else it honestly could
+      # be: docker/Dockerfile.projects compiles nothing and declares no manifest a scanner could
+      # read — it copies one binary out of one published image onto another published image. What a
+      # consumer of an agent container needs to know is exactly which two, at which versions, and
+      # each of those has its own release and its own document to follow.
+      #
+      # BUILT FROM THE REFERENCES THIS STEP PASSED, not scraped out of the Dockerfile: both `FROM`s
+      # there are `${BASE}` and `${DAEMON_IMAGE}`, so the file itself names nothing resolvable and
+      # the two --build-args above are the only place the real coordinates exist. Reading them back
+      # from the variables is also what keeps the document honest if a default ever drifts.
+      #
+      # HAND-BUILT WITH printf, in three appends rather than one unreadable format string. Every
+      # value goes through `%s`, so nothing in a reference can be read as a printf directive; both
+      # $version and $base_version were refused above unless they are CalVer.
+      base_repository="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/workspace-base"
+      agent_root="pkg:docker/qits/project-agent@$version"
+      base_purl="pkg:docker/$base_repository@$base_version"
+      daemon_purl="pkg:docker/$repository@$version"
+      printf '{"bomFormat":"CycloneDX","specVersion":"1.6","version":1,' > sbom-project-agent.json
+      printf '"metadata":{"component":{"type":"container","bom-ref":"%s",' \
+        "$agent_root" >> sbom-project-agent.json
+      printf '"name":"qits/project-agent","version":"%s","purl":"%s"}},' \
+        "$version" "$agent_root" >> sbom-project-agent.json
+      printf '"components":[' >> sbom-project-agent.json
+      printf '{"type":"container","bom-ref":"%s","name":"%s","version":"%s","purl":"%s"},' \
+        "$base_purl" "$base_repository" "$base_version" "$base_purl" >> sbom-project-agent.json
+      printf '{"type":"container","bom-ref":"%s","name":"%s","version":"%s","purl":"%s"}],' \
+        "$daemon_purl" "$repository" "$version" "$daemon_purl" >> sbom-project-agent.json
+      printf '"dependencies":[{"ref":"%s","dependsOn":["%s","%s"]}]}\n' \
+        "$agent_root" "$base_purl" "$daemon_purl" >> sbom-project-agent.json
+      curl -fsS -X PUT -H 'Content-Type: application/vnd.cyclonedx+json' \
+        --data-binary @sbom-project-agent.json \
+        "$sbom_base/docker/qits/project-agent/-/$version"
