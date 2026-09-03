@@ -12,10 +12,10 @@
 # locally. `qits/workspace` is the wrong base either way: it is the same toolchain with the
 # *workspace* daemon layered on, so taking it would carry a second binary this image never runs.
 #
-# BOTH ARGS ARE UNQUALIFIED AND BOTH SHOULD BE OVERRIDDEN. No registry-qualified reference is
+# BOTH ARGS ARE UNQUALIFIED AND BOTH ARE OVERRIDDEN BY CI. No registry-qualified reference is
 # portable here — the registry is `qits-platform-artifacts:8080` inside a step container and
-# `localhost:8081` outside — so the defaults name the local convenience tags and anything building
-# for real passes a qualified, version-pinned value, which is what
+# `localhost:8081` outside — so the defaults name what a developer's machine can resolve and
+# anything building for real passes a qualified, version-pinned value, which is what
 # `.config/qits/ci-event-release.yml` does:
 #
 #     docker build -f docker/Dockerfile.projects \
@@ -28,14 +28,44 @@
 #     docker build -t qits/projects-daemon:latest -f docker/Dockerfile .
 #     docker build -t qits/project-agent:native -f docker/Dockerfile.projects .
 #
+# --- BASE CARRIES A LITERAL VERSION, AND THAT IS THE TOOLCHAIN PIN ---------------------------------
+# The version in `ARG BASE` is not decoration on a convenience default: it IS the committed pin, and
+# it lives here rather than in a file beside the pipeline because qits-maintenance reads literal
+# `ARG <NAME>=<image>:<tag>` Dockerfile defaults as docker pins — this one at `arg:BASE`, matched on
+# the bare `qits/workspace-base` — and its bump pipeline rewrites this line's tag when the toolchain
+# releases. It used to be `.config/qits/workspace-base.version`, one line moved by a hop pipeline in
+# this repository; the hop is gone and the pin moved into the line the build already reads.
+#
+# WHICH IS WHY `.config/qits/ci-event-release.yml` NOW DERIVES ITS `--build-arg BASE=` FROM THIS
+# LINE. The property the file gave up must not be lost with it: the release pipeline reads the pin
+# out of the RELEASED tree, so rebuilding a tag rebuilds on exactly the toolchain that tag shipped
+# with, rather than on whatever is newest. A floating tag would break that — and there is none to
+# follow anyway, since qits-workspace-oci publishes only `:<version>`.
+#
+# KEEP THE VALUE LITERAL. A `$`, a `@`, a `://`, or a tag with no `/` before it each make maintenance
+# stop seeing a pin here. Nothing would fail; the base would just quietly stop following the
+# toolchain forever.
+#
+# --- DAEMON_IMAGE IS DELIBERATELY *NOT* A PIN -----------------------------------------------------
+# The `${DAEMON_VERSION}` indirection is load-bearing and the whole reason DAEMON_VERSION exists.
+# This ARG names THIS repository's own artifact, and a literal `qits/projects-daemon:<version>` here
+# would be read as a docker pin like any other — so every release of this repository would make its
+# own Dockerfile outdated and maintenance would open a bump proposing this repository follow itself,
+# forever. Docker pins have no reactor-own exclusion the way maven coordinates do, so the exclusion
+# has to be written in the value: a `$` is never a pin.
+#
+# The default still resolves to `qits/projects-daemon:latest` for a developer, and CI overrides
+# DAEMON_IMAGE wholesale with the reference it just pushed, so nothing about the build changes.
+# DAEMON_VERSION is not meant to be passed by hand; override DAEMON_IMAGE, as the release does.
 # --- why BASE is the FULL workspace toolchain -----------------------------------------------------
 # A leaner base was on the table: a project agent's own job is git plus a coding-agent CLI, and it
 # runs no dev server of its own. It takes the whole toolchain anyway, because the agent's job is to
 # work on the project's code — build it, test it, run its tooling — and a base that cannot compile
 # the project makes the agent useless at the thing it exists for. Trimming it would also fork the
 # toolchain: two images to keep in step, and a build failure that only reproduces in one of them.
-ARG BASE=qits/workspace-base:latest
-ARG DAEMON_IMAGE=qits/projects-daemon:latest
+ARG BASE=qits/workspace-base:2026.902.143920
+ARG DAEMON_VERSION=latest
+ARG DAEMON_IMAGE=qits/projects-daemon:${DAEMON_VERSION}
 
 FROM ${DAEMON_IMAGE} AS daemon
 

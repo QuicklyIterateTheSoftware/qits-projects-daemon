@@ -24,16 +24,20 @@
 # is started from a version, so the version is the only coordinate worth the bytes. The daemon image
 # stays in post-receive because it is small.
 #
-# THE BASE IS PINNED BY VERSION, NOT FOLLOWED BY A FLOATING TAG.
-# `.config/qits/workspace-base.version` beside this file holds one line. images/qits-oci-workspace
-# publishes only `:<version>` — no `:latest`, by its own ONE TAG PER PIPELINE rule — so there is no
-# floating tag to follow even if we wanted one, and following one would make this image
-# unreproducible: rebuilding a released version would silently pick up a different toolchain.
+# THE BASE IS PINNED BY VERSION, NOT FOLLOWED BY A FLOATING TAG, AND THE PIN LIVES IN THE DOCKERFILE.
+# `docker/Dockerfile.projects`'s `ARG BASE=qits/workspace-base:<version>` holds it, and the step below
+# scrapes that line. images/qits-oci-workspace publishes only `:<version>` — no `:latest`, by its own
+# ONE TAG PER PIPELINE rule — so there is no floating tag to follow even if we wanted one, and
+# following one would make this image unreproducible: rebuilding a released version would silently
+# pick up a different toolchain.
 #
-# ci-event-upstream-oci-workspace.yml IS WHAT MOVES THAT PIN, and ci-post-receive.yml's maintenance
-# leg is what turns the moved pin into a release. The loop closes with nobody in it: the toolchain
-# releases, the pin bumps onto `maintenance/qits-workspace-oci`, that push releases this repository,
-# and this pipeline republishes `qits/project-agent` on the new base.
+# QITS-MAINTENANCE IS WHAT MOVES THAT PIN. It reads literal `ARG <NAME>=<image>:<tag>` defaults as
+# docker pins, bumps the tag on its own branch when the toolchain releases, and asks the release door
+# itself. The loop closes with nobody in it and with nothing repository-local doing the following:
+# the toolchain releases, the pin bumps, that push releases this repository, and this pipeline
+# republishes `qits/project-agent` on the new base. It replaced a hop pipeline here that rewrote a
+# `.config/qits/workspace-base.version` file; the file went with it, because a pin the machine reads
+# has to sit where the machine looks.
 #
 # `artifacts:` IS A DECLARATION, NOT A REPORT. qits-ci never learns how to publish anything — the
 # `docker push`es below are this repository's own step — so it cannot see what landed. It announces
@@ -125,20 +129,31 @@ steps:
 
       # THE TOOLCHAIN PIN, READ FROM THE RELEASED TREE. The checkout above already moved this tree to
       # `$version`, so the base version is the one that tree was released with — rebuilding a tag
-      # rebuilds it on the same toolchain, which is the whole reason the pin is a committed file.
-      # Reading it before the checkout would have taken main's.
+      # rebuilds it on the same toolchain, which is the whole reason the pin is committed. Reading it
+      # before the checkout would have taken main's.
+      #
+      # THE PIN'S HOME IS docker/Dockerfile.projects NOW, not `.config/qits/workspace-base.version`.
+      # That file is deleted, and with it the hop pipeline that rewrote it: qits-maintenance reads the
+      # literal `ARG BASE=qits/workspace-base:<version>` default as a docker pin and bumps the tag on
+      # that line. So this step scrapes the line rather than reading a file — the version has to come
+      # from wherever the machine moves it, and the Dockerfile is that place.
+      #
+      # ANCHORED ON THE WHOLE LINE, WHICH IS WHAT MAKES IT SAFE TO SCRAPE. `^ARG BASE=` matches
+      # exactly one line in that file, and `DAEMON_IMAGE` — the other image ARG — cannot be caught by
+      # it. An empty result fails the CalVer check below, so a reflowed or renamed pin stops the
+      # release rather than composing a reference with no tag.
       #
       # READ AND VALIDATED HERE, BEFORE ANY BUILD, though it is only used by the second one. A bad
       # pin caught after the daemon push would leave exactly the partial release this pipeline is
       # shaped to avoid: one of the two declared artifacts published, the other never built, and the
       # run red. Both inputs are checked while nothing has been pushed.
-      base_version=$(cat .config/qits/workspace-base.version)
+      base_version=$(sed -nE 's#^ARG BASE=qits/workspace-base:(.+)$#\1#p' docker/Dockerfile.projects)
       # Validated exactly like $version, and for the same reason: it becomes part of an image
-      # reference. A stray `:` or `/` would pull a different image entirely, and an empty file would
-      # compose a reference with no tag — which docker reads as `:latest`, a tag
+      # reference. A stray `:` or `/` would pull a different image entirely, and an unmatched sed
+      # would compose a reference with no tag — which docker reads as `:latest`, a tag
       # images/qits-oci-workspace never publishes.
       case "$base_version" in
-        ''|*[!0-9.]*) echo "workspace-base.version is not a CalVer: $base_version" >&2; exit 1 ;;
+        ''|*[!0-9.]*) echo "ARG BASE in docker/Dockerfile.projects is not a CalVer pin: $base_version" >&2; exit 1 ;;
       esac
       echo "layering onto qits/workspace-base:$base_version"
 
@@ -177,11 +192,14 @@ steps:
       # BuildKit's exporter does not reliably leave in the local store. Two builds, two pushes, and
       # each image is pushed before the next thing runs.
       #
-      # BOTH ARGS ARE PASSED QUALIFIED. docker/Dockerfile.projects defaults them to bare local
-      # convenience tags (`qits/workspace-base:latest`) for a developer's machine; nothing here has
-      # those, and a build that fell back to them would either fail or — worse — succeed against
-      # something stale. DAEMON_IMAGE is the reference just built and pushed, so the layer is this
-      # release's daemon and not a pull of some other version.
+      # BOTH ARGS ARE PASSED QUALIFIED. docker/Dockerfile.projects defaults them to bare names a
+      # developer's machine can resolve; nothing here has those, and a build that fell back to them
+      # would either fail or — worse — succeed against something stale. BASE carries `$base_version`,
+      # which is that file's own pin read back above, so the qualification adds the registry and
+      # nothing else. DAEMON_IMAGE is the reference just built and pushed, so the layer is this
+      # release's daemon and not a pull of some other version — and it is passed WHOLE, which is why
+      # the Dockerfile is free to compose its own default out of `${DAEMON_VERSION}` to stay
+      # invisible to the pin inventory.
       agent="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/project-agent:$version"
       docker build -t "$agent" -f docker/Dockerfile.projects \
         --build-arg "BASE=$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/workspace-base:$base_version" \
@@ -233,10 +251,11 @@ steps:
       # consumer of an agent container needs to know is exactly which two, at which versions, and
       # each of those has its own release and its own document to follow.
       #
-      # BUILT FROM THE REFERENCES THIS STEP PASSED, not scraped out of the Dockerfile: both `FROM`s
-      # there are `${BASE}` and `${DAEMON_IMAGE}`, so the file itself names nothing resolvable and
-      # the two --build-args above are the only place the real coordinates exist. Reading them back
-      # from the variables is also what keeps the document honest if a default ever drifts.
+      # BUILT FROM THE REFERENCES THIS STEP PASSED: both `FROM`s in docker/Dockerfile.projects are
+      # `${BASE}` and `${DAEMON_IMAGE}`, so no line in that file is a resolvable reference and the
+      # two --build-args above are the only place the real, registry-qualified coordinates exist.
+      # `$base_version` did come out of that file's `ARG BASE` pin — but as the version alone, and
+      # what the document records is the reference this build actually used.
       #
       # HAND-BUILT WITH printf, in three appends rather than one unreadable format string. Every
       # value goes through `%s`, so nothing in a reference can be read as a printf directive; both

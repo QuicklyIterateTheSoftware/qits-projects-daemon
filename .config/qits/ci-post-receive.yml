@@ -36,12 +36,13 @@
 # and nothing starts an agent from a sha — so paying that on every commit would buy a coordinate no
 # consumer can use. ci-event-release.yml builds it, once, per version.
 #
-# THE BUMP TRAIN'S LOOP IS CLOSED SOMEWHERE ELSE NOW. ci-event-upstream-oci-workspace.yml still
-# follows a toolchain release by rewriting `.config/qits/workspace-base.version` and pushing
-# `maintenance/qits-workspace-oci`, and that push still lands here for its build. The release that
-# used to follow it was a third step here asking the qits-workspaces door; qits-maintenance makes
-# that ask itself now, with its own credential, on the same push. This pipeline builds; it no
-# longer releases.
+# THE BUMP TRAIN IS SOMEBODY ELSE'S ENTIRELY NOW, AND THIS PIPELINE JUST BUILDS WHAT IT PUSHES.
+# This repository no longer follows a toolchain release by rewriting `.config/qits/workspace-base.version`
+# from a hop pipeline of its own — both are deleted. qits-maintenance reads the literal
+# `ARG BASE=qits/workspace-base:<version>` default in docker/Dockerfile.projects as an ordinary
+# docker pin, rewrites the tag on its own branch, and asks the qits-workspaces door itself with its
+# own credential. That branch still lands here for its build, which is all this pipeline owes the
+# train: it builds; it no longer releases.
 steps:
   - image: qits/build-images/maven-base:latest
     timeout-seconds: 1800
