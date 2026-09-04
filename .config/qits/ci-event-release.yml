@@ -171,14 +171,20 @@ steps:
       #
       # THE TWO --secret FLAGS ARE THE FLEET'S SHAPE FOR A CREDENTIAL INSIDE A BUILD, and both builds
       # below carry them. The launcher injects the run's commissioned idp client as
-      # $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET, and a Dockerfile that needs it
-      # mounts it on one RUN — never a --build-arg, which is recorded in a pullable image's history.
-      # Neither build here needs one: the daemon's Maven resolve is reactor-only over public
-      # repositories, and Dockerfile.projects only copies. Inert on both counts — buildx ignores a
-      # secret no RUN mounts, and a missing env source is NOT an error (measured on buildx v0.36.1,
-      # the build runs green with the variable unset).
+      # $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET; the daemon Dockerfile's mvnw
+      # RUN mounts them for `.qits-maven-settings.xml`'s `qits-central-proxy` server — never a
+      # --build-arg, which is recorded in a pullable image's history. Dockerfile.projects only
+      # copies, so its pair stays inert — buildx ignores a secret no RUN mounts, and a missing env
+      # source is NOT an error (measured on buildx v0.36.1, the build runs green with the variable
+      # unset).
+      #
+      # --network host and the QITS_MAVEN_CENTRAL_URL build-arg route the daemon build's Maven
+      # Central resolve through the mirror: the injected URL is an edge vhost on 127.0.0.1:8080,
+      # which only the host namespace reaches. Empty deactivates the settings profile and the
+      # resolve goes to Central directly, as it always did.
       repository="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/projects-daemon"
-      docker build \
+      docker build --network host \
+        --build-arg QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" \
         --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
         --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
         -t "$repository:$version" -f docker/Dockerfile .
@@ -234,10 +240,11 @@ steps:
 
       # THE DAEMON IMAGE'S DOCUMENT IS ITS MAVEN CLOSURE, and it comes out of the same Dockerfile
       # that built it: `--target sbom` reaches a `FROM scratch` stage holding the document the
-      # builder's mvnw run already wrote. Secrets are BYTE-IDENTICAL to the image build above and
-      # there is still no `--network` flag, so every layer is a cache hit and this costs seconds
-      # rather than a second native compile.
-      docker build --target sbom --output type=local,dest=.sbom \
+      # builder's mvnw run already wrote. Network, build-arg and secrets are BYTE-IDENTICAL to the
+      # image build above, so every layer is a cache hit and this costs seconds rather than a
+      # second native compile.
+      docker build --network host --target sbom --output type=local,dest=.sbom \
+        --build-arg QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" \
         --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
         --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
         -f docker/Dockerfile .

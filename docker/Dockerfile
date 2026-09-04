@@ -49,12 +49,27 @@ RUN ./mvnw --version
 # keeps this cheap — without it this line drags in every target/ dir.
 COPY . .
 
+# Where Maven Central is mirrored, when it is. CI passes the platform's pull-through
+# (qits-platform-mirror's central proxy, the same authority the FROM line above pulls through);
+# EMPTY — the default — means direct Maven Central. `.qits-maven-settings.xml` activates its
+# central-proxy profile only on a non-empty value, so a hand build that passes nothing resolves
+# exactly as it always did.
+ARG QITS_MAVEN_CENTRAL_URL=
+ENV QITS_MAVEN_CENTRAL_URL=$QITS_MAVEN_CENTRAL_URL
+
 # -Dnative flips quarkus.native.enabled (this project carries its own `native` profile). Cap
 # native-image RAM so the build is deterministic on small machines.
 #
+# The two secret mounts put the CI run's commissioned client into THIS `RUN`'s environment and
+# nowhere else — not a layer, not the image history. `.qits-maven-settings.xml` reads them as the
+# `qits-central-proxy` server; Maven sends them only if the mirror route ever answers 401 (edge
+# reads are anonymous today). Absent secrets leave both unset, which is every hand build's state.
+#
 # Tests are skipped because they are not skippable HERE: CommandRegistryTest spawns real PTYs and
 # the socket suites bind real ports. `./mvnw verify` on a clone is the gate for those.
-RUN ./mvnw -B -ntp -pl projects-daemon -am package -Dnative -DskipTests \
+RUN --mount=type=secret,id=qits-client-id,env=QITS_MAVEN_AUTH_USR \
+    --mount=type=secret,id=qits-client-secret,env=QITS_MAVEN_AUTH_PSW \
+    ./mvnw -B -ntp -s .qits-maven-settings.xml -pl projects-daemon -am package -Dnative -DskipTests \
       -Dquarkus.native.native-image-xmx=4g \
       org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeBom \
       -DoutputFormat=json -DoutputName=sbom -DschemaVersion=1.6 \
