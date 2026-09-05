@@ -35,19 +35,29 @@
 #   2. the shipping form — the container image, whose builder stage is the native compile.
 #
 # THIS REPO NEEDS NO HAND-ROLLED BUILDER CONTAINER. docker/Dockerfile already native-compiles the
-# binary in a Mandrel builder stage, so a plain `docker build` is the whole native build.
+# binary in a Mandrel builder stage, so one `buildctl build` is the whole native build.
 # qits-ci-daemon starts a builder container by hand and copies the binary out because it ships a
 # bare binary and no image at all; that shape does not belong here.
 #
-# WHY THE IMAGE STEP DECLARES `docker: true`: it hands the step the HOST daemon's socket, which is
-# the side the Dockerfile is written for. Its `FROM localhost:8082/…` lines are
-# qits-platform-mirror's pull-through mirrors of quay.io and registry.access.redhat.com — an address
-# the host daemon resolves and nothing inside this step's container can. The native build's memory
-# is the host daemon's for the same reason.
+# THE IMAGE STEP DECLARES `build: true`, WHICH IS WHERE `docker: true` USED TO BE. The build runs on
+# the platform's own buildkitd now, not the host docker daemon — qits-buildkit-plan.md in the wrapper
+# is the whole migration and qits-workspace-daemon's recipe pair is the worked reference. The flag is
+# the per-step, diff-visible declaration the platform keys everything on (the commissioned
+# credential, the auth document, and the $BUILDKIT_HOST qits-containers injects into exactly these
+# steps), and unlike its predecessor it hands the step no docker socket, because nothing here uses
+# one.
 #
-# No `--network` flag: nothing in this build dials the platform. The reactor declares no
-# `<repositories>`, so the builder stage resolves from Maven Central, and the base images are the
-# host daemon's to pull.
+# THE DOCKERFILE'S BASE REFERENCES STAY COMMITTED AS THEY ARE. Its `FROM mirror.dev.localhost:8080/…`
+# lines are qits-platform-mirror's pull-through mirrors of quay.io and registry.access.redhat.com —
+# an edge vhost only the host namespace resolves — and the builder's own registry config rewrites
+# them to the platform aliases, so the same committed spelling serves a developer's `docker build`
+# and a CI run alike. The native build's memory is the builder container's now, and the builder is
+# where the layer cache lives.
+#
+# No `--network host` and nothing replacing it: a `RUN` executes in the builder's namespace on
+# qits-net, so anything a build dials, it dials by in-network address ($QITS_MAVEN_PROXY_URL below).
+# The reactor declares no `<repositories>`, so the builder stage resolves from Maven Central —
+# through that mirror when the platform offers one.
 #
 # THE NAME SEGMENT IS `projects-daemon`, NOT THIS REPOSITORY'S NAME. `qits/projects-daemon` is what
 # the Dockerfile and ci-event-release.yml's declaration already say. The rule that the segment must
@@ -98,33 +108,50 @@ steps:
       ./mvnw -B -ntp -s .qits-maven-settings.xml verify
 
   - image: qits/build-images/ci-base:latest
-    docker: true
+    build: true
     timeout-seconds: 3600
     script: |
-      # Same reason as above, and one more: without -e a failed `docker build` lets the push run on
-      # a stale local image, `docker rmi || true` answers 0, and the run reports SUCCESS for an
-      # image that was never built. -u stops the step on an unset registry variable rather than
-      # composing a ref out of empty strings.
+      # Same reason as above, and one more: without -e a failed buildctl call would let a later line
+      # run as if the image existed, and the run would report SUCCESS for an image that was never
+      # built. -u stops the step on an unset injected variable rather than composing a ref out of
+      # empty strings.
       set -eu
-      # The two --secret flags are the fleet's shape for a credential inside a build: the launcher
-      # injects the run's commissioned idp client as
-      # $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET, and the Dockerfile's mvnw
-      # RUN mounts them for `.qits-maven-settings.xml`'s `qits-central-proxy` server — never a
-      # --build-arg, which is recorded in a pullable image's history.
+      # The builder, demanded loudly before anything is built. Unset means a qits-ci/qits-containers
+      # pair too old to inject them; EMPTY means the kill switch (qits.ci.buildkit.enabled=false
+      # spells off as empty-never-absent). Either way this recipe fails here, naming the cause,
+      # rather than falling back to a socket it no longer even holds — the silent fallback is exactly
+      # what the migration exists to remove.
+      : "${BUILDKIT_HOST:?the platform builder is off or not injected; this recipe builds only through it}"
+      : "${QITS_BUILD_REGISTRY:?}"
+      # The two secrets are the fleet's shape for a credential inside a build, and they are in FILE
+      # form on both sides: written here under umask 077 into /tmp — outside the clone, so neither
+      # can enter the build context — handed to buildctl as `src=`, and mounted by the Dockerfile as
+      # bare files under /run/secrets. Never a --build-arg, which is recorded in a pullable image's
+      # history, and never the `env=` mount form, which couples this recipe to whichever
+      # dockerfile frontend the builder runs. The launcher injects the run's commissioned idp client
+      # as $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET, which the Dockerfile's mvnw
+      # RUN reads for `.qits-maven-settings.xml`'s `qits-central-proxy` server; `:-` keeps the pair
+      # OPTIONAL exactly as `--secret …,env=` did, so a deployment with no idp client builds green.
+      umask 077
+      printf '%s' "${QITS_COMMISSIONED_CLIENT_ID:-}" > /tmp/qits-client-id
+      printf '%s' "${QITS_COMMISSIONED_CLIENT_SECRET:-}" > /tmp/qits-client-secret
+      # The QITS_MAVEN_CENTRAL_URL build-arg carries the mirror's IN-NETWORK route
+      # ($QITS_MAVEN_PROXY_URL). There is no `--network host` any more and nothing replaces it: a RUN
+      # executes in the builder's namespace on qits-net, where the edge vhost the old flag reached
+      # ($QITS_MAVEN_CENTRAL_MIRROR_URL, 127.0.0.1:8080) does not resolve. Empty — an older qits-ci,
+      # or the mirror plane turned off — deactivates the settings profile and the resolve goes to
+      # Central directly, as it always did.
       #
-      # --network host and the QITS_MAVEN_CENTRAL_URL build-arg route the RUN's Maven Central
-      # resolve through the mirror: the injected URL is an edge vhost on 127.0.0.1:8080, which only
-      # the host namespace reaches. Empty — an older qits-ci, or the mirror plane turned off —
-      # deactivates the settings profile and the resolve goes to Central directly, as it always did.
-      ref="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/projects-daemon:$QITS_CI_SHA"
-      docker build --network host \
-        --build-arg QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" \
-        --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
-        --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
-        -t "$ref" -f docker/Dockerfile .
-      docker push "$ref"
-      # NO `docker rmi "$ref"`: on a CI host it frees nothing — the layers stay in the builder's
-      # cache either way — while under the containerd image store it drops the last reference to
-      # content a concurrent build of this same Dockerfile may still be resolving. Two builds of
-      # this one Dockerfile do run concurrently, main's and environment/dev's, which is the race
-      # that broke the release of 2026-08-11.
+      # `push=true` REPLACES `docker push`: the image goes from the builder to the registry and never
+      # enters any local image store, which also retires the old rmi-race note — the two concurrent
+      # builds of this one Dockerfile share the builder's cache, which is content-addressed and
+      # refcounted, so neither can pull content out from under the other. $QITS_BUILD_REGISTRY is the
+      # registry as the BUILDER resolves it; $QITS_REGISTRY stays the host daemon's view and is not
+      # dialled here.
+      ref="$QITS_BUILD_REGISTRY/$QITS_IMAGE_REPOSITORY/projects-daemon:$QITS_CI_SHA"
+      buildctl build --frontend dockerfile.v0 \
+        --local context=. --local dockerfile=docker \
+        --opt build-arg:QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}" \
+        --secret id=qits-client-id,src=/tmp/qits-client-id \
+        --secret id=qits-client-secret,src=/tmp/qits-client-secret \
+        --output "type=image,name=$ref,push=true"

@@ -40,7 +40,7 @@
 # has to sit where the machine looks.
 #
 # `artifacts:` IS A DECLARATION, NOT A REPORT. qits-ci never learns how to publish anything — the
-# `docker push`es below are this repository's own step — so it cannot see what landed. It announces
+# `buildctl` pushes below are this repository's own step — so it cannot see what landed. It announces
 # one `SoftwareRelease` per entry on the strength of these lines once the whole pipeline is green.
 # Keep them true.
 #
@@ -50,11 +50,14 @@
 # `qits/projects-daemon` and `qits/project-agent`, and the reader supplies its own host, exactly as
 # the step below composes one from environment.
 #
-# THE DAEMON BUILD BELOW IS ci-post-receive.yml's, AND THE TWO MUST STAY MATCHED. That file explains
-# why `docker: true` is what the Dockerfile's `localhost:8082` bases need, why no hand-rolled builder
-# container is involved, and why there is no `--network` flag; this one carries the short form and
-# points there rather than keeping a second copy of the reasoning to drift. The layered build has no
-# counterpart there and never will — see above.
+# THE DAEMON BUILD BELOW IS ci-event-release-request.yml's, AND THE TWO MUST STAY MATCHED — byte for
+# byte in every buildctl argument, because the platform builder's cache is shared and a matched build
+# is what makes a release that follows a green fold a stack of cache hits rather than a second native
+# compile. That file explains the whole builder arrangement (`build: true` as the declaration that
+# injects `$BUILDKIT_HOST` and mounts no socket, why the Dockerfile's committed mirror vhosts are the
+# builder's to rewrite, the file-form secrets, why there is no `--network host` any more); this one
+# carries the short form and points there rather than keeping a second copy of the reasoning to
+# drift. The layered build has no counterpart there and never will — see above.
 #
 # THE VERSION TAG IS STILL THE DURABLE STAMP, BUT IT NO LONGER TRIGGERS. Under the release-request
 # flow the tag is written by qits-githost's tag primitive, which announces nothing — the trigger is
@@ -102,26 +105,41 @@ artifacts:
   - { type: docker, name: qits/projects-daemon }
   - { type: docker, name: qits/project-agent }
 steps:
-    # ci-base: the docker CLI for the build, git for the tag checkout, jq for the event payload.
-    # Nothing needs maven on THIS side of the socket — the reactor is built inside the image's own
+    # ci-base: buildctl for the builds, git for the tag checkout, jq for the event payload.
+    # Nothing needs maven on ANY side of the builder — the reactor is built inside the image's own
     # builder stage.
     #
-    # BOTH IMAGES ARE ONE STEP because the second consumes the first. A second step gets a fresh
-    # container and an empty local image store, so it would have to pull the daemon image straight
-    # back out of the registry it was just pushed to. Splitting buys nothing and costs a round trip.
+    # `build: true` REPLACED `docker: true` WHEN THE BUILD MOVED OFF THE HOST DAEMON. It is the
+    # per-step, diff-visible declaration the platform keys everything on — the commissioned
+    # credential, the auth document, and the platform builder's address, which qits-containers
+    # injects as $BUILDKIT_HOST into exactly these steps — and it mounts no docker socket, because
+    # nothing here uses one. qits-buildkit-plan.md is the whole migration.
+    #
+    # BOTH IMAGES ARE STILL ONE STEP, and the reason changed shape rather than going away: the second
+    # build's `DAEMON_IMAGE` is the reference the first one pushed, so the two are ordered and the
+    # second is only a `FROM` away from a registry pull the builder makes for itself. Keeping them in
+    # one step keeps that ordering visible and costs nothing, since a step container carries no image
+    # store either way.
     #
     # TWO HOURS, NOT ONE. The layered build pulls the ~3.4 GB toolchain base and pushes a layer on
     # top of it, on top of the daemon's native compile. images/qits-oci-workspace found an hour short
     # of headroom for the same bytes on a cold cache.
   - image: qits/build-images/ci-base:latest
-    docker: true
+    build: true
     timeout-seconds: 7200
     script: |
-      # The daemon runs this with `bash -c` and no -e, so without this a failed docker build is
-      # swallowed: the push runs on a stale local image or fails, `docker rmi || true` answers 0,
-      # and the run reports SUCCESS — and a green release run is what makes qits-ci announce the
-      # artifact. -u makes an unset injected variable stop the step too.
+      # The daemon runs this with `bash -c` and no -e, so without this a failed buildctl call is
+      # swallowed and the run reports SUCCESS for an image that was never built — and a green release
+      # run is what makes qits-ci announce the artifact. -u makes an unset injected variable stop the
+      # step too.
       set -eu
+
+      # The builder, demanded loudly before anything is built. Unset means a qits-ci/qits-containers
+      # pair too old to inject them; EMPTY means the kill switch (qits.ci.buildkit.enabled=false
+      # spells off as empty-never-absent). Either way this recipe must fail here, naming the cause,
+      # rather than compose a reference out of empty strings.
+      : "${BUILDKIT_HOST:?the platform builder is off or not injected; this recipe builds only through it}"
+      : "${QITS_BUILD_REGISTRY:?}"
 
       # THE EVENT, READ AS DATA. The payload reaches the container verbatim as one string in
       # $QITS_EVENT_PAYLOAD; there is no per-field projection.
@@ -175,69 +193,87 @@ steps:
       esac
       echo "layering onto qits/workspace-base:$base_version"
 
-      # THE VERSION IS THE ONLY COORDINATE THIS STEP PUSHES, and the sha coordinate is not missing:
-      # the release lands a commit on main, main's push runs ci-post-receive.yml, and that pushes
-      # `:<sha>` for the very same tree. Publishing both from here as well was tried and is what the
-      # first release of this file failed on — `docker build -t A -t B` reported naming both tags,
-      # then `docker push B` answered "tag does not exist", because BuildKit's exporter does not
-      # reliably leave every alias of a multi-tag build in the local image store. A second
-      # `docker tag` would paper over it, but the honest reading is that the two coordinates have
-      # two owners: post-receive names a build by its commit, and a release names it by its version.
+      # THE VERSION IS THE ONLY COORDINATE THIS STEP PUBLISHES, and the sha coordinate is not
+      # missing: ci-event-release-request.yml pushes `:<sha>` for every fold it builds green.
+      # Publishing both from here as well was tried and is what the first release of this file failed
+      # on — `docker build -t A -t B` reported naming both tags, then `docker push B` answered "tag
+      # does not exist", because BuildKit's exporter did not reliably leave every alias of a
+      # multi-tag build in the local image store. That store is no longer in the path at all under
+      # `push=true`, so the mechanism behind that failure is gone; what stays is the honest reading
+      # of it, which was never about the store: the two coordinates have two owners, the QA pipeline
+      # names a build by its commit and a release names it by its version. buildctl's push takes ONE
+      # name anyway, and a second name would be a second declaration.
       #
-      # Each build is therefore one build and one push, which is also the shape that cannot leave a
-      # partial release behind — the rule qits-oci's release pipeline states for its five images.
+      # Each build is therefore one build and one published name, which is also the shape that cannot
+      # leave a partial release behind — the rule qits-oci's release pipeline states for its five
+      # images.
       #
-      # THE TWO --secret FLAGS ARE THE FLEET'S SHAPE FOR A CREDENTIAL INSIDE A BUILD, and both builds
-      # below carry them. The launcher injects the run's commissioned idp client as
-      # $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET; the daemon Dockerfile's mvnw
-      # RUN mounts them for `.qits-maven-settings.xml`'s `qits-central-proxy` server — never a
-      # --build-arg, which is recorded in a pullable image's history. Dockerfile.projects only
-      # copies, so its pair stays inert — buildx ignores a secret no RUN mounts, and a missing env
-      # source is NOT an error (measured on buildx v0.36.1, the build runs green with the variable
-      # unset).
-      #
-      # --network host and the QITS_MAVEN_CENTRAL_URL build-arg route the daemon build's Maven
-      # Central resolve through the mirror: the injected URL is an edge vhost on 127.0.0.1:8080,
-      # which only the host namespace reaches. Empty deactivates the settings profile and the
-      # resolve goes to Central directly, as it always did.
-      repository="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/projects-daemon"
-      docker build --network host \
-        --build-arg QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" \
-        --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
-        --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
-        -t "$repository:$version" -f docker/Dockerfile .
+      # THE TWO SECRETS ARE THE FLEET'S SHAPE FOR A CREDENTIAL INSIDE A BUILD, and both builds below
+      # carry them, in FILE form on both sides: written under umask 077 into /tmp — outside the
+      # clone, so neither can enter a build context — handed to buildctl as `src=`, and mounted by
+      # the daemon Dockerfile as bare files under /run/secrets for `.qits-maven-settings.xml`'s
+      # `qits-central-proxy` server. Never a --build-arg, which is recorded in a pullable image's
+      # history, and never the `env=` mount form, which couples this recipe to the builder's
+      # dockerfile-frontend version. The launcher injects the run's commissioned idp client as
+      # $QITS_COMMISSIONED_CLIENT_ID/$QITS_COMMISSIONED_CLIENT_SECRET, and `:-` keeps the pair
+      # OPTIONAL exactly as `--secret …,env=` was. Dockerfile.projects only copies, so its pair stays
+      # inert — buildkit ignores a secret no RUN mounts.
+      umask 077
+      printf '%s' "${QITS_COMMISSIONED_CLIENT_ID:-}" > /tmp/qits-client-id
+      printf '%s' "${QITS_COMMISSIONED_CLIENT_SECRET:-}" > /tmp/qits-client-secret
 
-      docker push "$repository:$version"
+      # The QITS_MAVEN_CENTRAL_URL build-arg routes the daemon build's Maven Central resolve through
+      # the mirror by its IN-NETWORK route ($QITS_MAVEN_PROXY_URL). There is no `--network host` and
+      # nothing replaces it: a RUN executes in the builder's namespace on qits-net, where the edge
+      # vhost the old flag reached ($QITS_MAVEN_CENTRAL_MIRROR_URL, 127.0.0.1:8080) does not resolve.
+      # Empty deactivates the settings profile and the resolve goes to Central directly, as it always
+      # did.
+      #
+      # `push=true` REPLACES `docker push`: the image goes from the builder straight to the registry,
+      # under $QITS_BUILD_REGISTRY — the registry as the BUILDER resolves it. $QITS_REGISTRY stays
+      # the host daemon's view and is not dialled anywhere in this step.
+      repository="$QITS_BUILD_REGISTRY/$QITS_IMAGE_REPOSITORY/projects-daemon"
+      buildctl build --frontend dockerfile.v0 \
+        --local context=. --local dockerfile=docker \
+        --opt build-arg:QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}" \
+        --secret id=qits-client-id,src=/tmp/qits-client-id \
+        --secret id=qits-client-secret,src=/tmp/qits-client-secret \
+        --output "type=image,name=$repository:$version,push=true"
 
       # ---- the layered project-agent image ----------------------------------------------------
       #
-      # ONE TAG PER BUILD STILL HOLDS. This is a second build with a single `-t`, not a second `-t`
-      # on the first: the rule the paragraph above states is about aliases of ONE build, which
-      # BuildKit's exporter does not reliably leave in the local store. Two builds, two pushes, and
-      # each image is pushed before the next thing runs.
+      # ONE NAME PER BUILD STILL HOLDS. This is a second build with a single `--output`, not a second
+      # name on the first: buildctl's push takes one name, and a second name would be a second
+      # declaration. Two builds, two pushes, and each image is published before the next thing runs.
       #
-      # BOTH ARGS ARE PASSED QUALIFIED. docker/Dockerfile.projects defaults them to bare names a
-      # developer's machine can resolve; nothing here has those, and a build that fell back to them
-      # would either fail or — worse — succeed against something stale. BASE carries `$base_version`,
-      # which is that file's own pin read back above, so the qualification adds the registry and
-      # nothing else. DAEMON_IMAGE is the reference just built and pushed, so the layer is this
-      # release's daemon and not a pull of some other version — and it is passed WHOLE, which is why
-      # the Dockerfile is free to compose its own default out of `${DAEMON_VERSION}` to stay
-      # invisible to the pin inventory.
-      agent="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/project-agent:$version"
-      docker build -t "$agent" -f docker/Dockerfile.projects \
-        --build-arg "BASE=$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/workspace-base:$base_version" \
-        --build-arg "DAEMON_IMAGE=$repository:$version" \
-        --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
-        --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET .
-      docker push "$agent"
+      # THE DOCKERFILE LIVES BESIDE THE OTHER ONE, so the local context is the repo root and the
+      # local dockerfile directory is `docker` again, with `filename=` naming the file — the whole of
+      # what the retired `-f docker/Dockerfile.projects .` said.
+      #
+      # BOTH ARGS ARE PASSED QUALIFIED, AND QUALIFIED FOR THE BUILDER. docker/Dockerfile.projects
+      # defaults them to bare names a developer's machine can resolve; nothing here has those, and a
+      # build that fell back to them would either fail or — worse — succeed against something stale.
+      # They are the references the BUILDER pulls `FROM`, so they carry $QITS_BUILD_REGISTRY and not
+      # the host daemon's $QITS_REGISTRY. BASE carries `$base_version`, which is that file's own pin
+      # read back above, so the qualification adds the registry and nothing else. DAEMON_IMAGE is the
+      # reference just built and pushed, so the layer is this release's daemon and not a pull of some
+      # other version — and it is passed WHOLE, which is why the Dockerfile is free to compose its
+      # own default out of `${DAEMON_VERSION}` to stay invisible to the pin inventory.
+      agent="$QITS_BUILD_REGISTRY/$QITS_IMAGE_REPOSITORY/project-agent:$version"
+      buildctl build --frontend dockerfile.v0 \
+        --local context=. --local dockerfile=docker \
+        --opt filename=Dockerfile.projects \
+        --opt "build-arg:BASE=$QITS_BUILD_REGISTRY/$QITS_IMAGE_REPOSITORY/workspace-base:$base_version" \
+        --opt "build-arg:DAEMON_IMAGE=$repository:$version" \
+        --secret id=qits-client-id,src=/tmp/qits-client-id \
+        --secret id=qits-client-secret,src=/tmp/qits-client-secret \
+        --output "type=image,name=$agent,push=true"
 
-      # NO `docker rmi` for either image: on a CI host it frees nothing — the layers stay in the
-      # builder's cache either way — while under the containerd image store it drops the last
-      # reference to content a concurrent build of this same Dockerfile may still be resolving,
-      # which is the race that broke the release of 2026-08-11. It is worse here than elsewhere:
-      # the daemon image is a build input to the layered one above, so a delete can pull content
-      # out from under a run that is still reading it.
+      # THERE IS NO `docker rmi` QUESTION LEFT for either image: neither ever enters a local image
+      # store, so there is nothing to delete and nothing a delete could pull out from under a
+      # concurrent build. The old note here recorded the 2026-08-11 release breaking on exactly that
+      # race, and it was worse here than elsewhere because the daemon image is a build input to the
+      # layered one; under `push=true` the layered build reads it back from the registry instead.
 
       # --- the SBOMs ------------------------------------------------------------------------------
       # TWO DECLARED ARTIFACTS, TWO DOCUMENTS. `artifacts:` above names two images and qits-ci
@@ -249,23 +285,27 @@ steps:
       #
       # The store is a sibling path of the npm registry inside the qits-artifacts deployment, so its
       # root is DERIVED from $QITS_NPM_REGISTRY_URL — the qits-net alias every step carries. NOT
-      # from $QITS_REGISTRY, which is the host-published name the docker daemon pushes through: from
-      # in here it answers curl with an instant connection refusal, and the edge in front of it 401s
-      # a sessionless write besides (measured twice on 2026.902.53027). Each path names a DECLARED
+      # from $QITS_REGISTRY, which is the host daemon's view of the registry and is dialled nowhere
+      # in this step now: from in here it answers curl with an instant connection refusal, and the
+      # edge in front of it 401s a sessionless write besides (measured twice on 2026.902.53027). Not
+      # from $QITS_BUILD_REGISTRY either — that one is the BUILDER's view, and this curl is the
+      # step's own. Each path names a DECLARED
       # artifact identity verbatim, because (packageType, packageName, version) is how the
       # SoftwareRelease consumer will ask for it.
       sbom_base="${QITS_NPM_REGISTRY_URL%%/artifacts/*}/artifacts/sboms"
 
       # THE DAEMON IMAGE'S DOCUMENT IS ITS MAVEN CLOSURE, and it comes out of the same Dockerfile
-      # that built it: `--target sbom` reaches a `FROM scratch` stage holding the document the
-      # builder's mvnw run already wrote. Network, build-arg and secrets are BYTE-IDENTICAL to the
-      # image build above, so every layer is a cache hit and this costs seconds rather than a
-      # second native compile.
-      docker build --network host --target sbom --output type=local,dest=.sbom \
-        --build-arg QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_CENTRAL_MIRROR_URL:-}" \
-        --secret id=qits-client-id,env=QITS_COMMISSIONED_CLIENT_ID \
-        --secret id=qits-client-secret,env=QITS_COMMISSIONED_CLIENT_SECRET \
-        -f docker/Dockerfile .
+      # that built it: `target=sbom` reaches a `FROM scratch` stage holding the document the
+      # builder's mvnw run already wrote, exported with `type=local` instead of pushed. Build-arg and
+      # secrets are BYTE-IDENTICAL to the image build above, so every layer is a cache hit in the
+      # same builder and this costs seconds rather than a second native compile.
+      buildctl build --frontend dockerfile.v0 \
+        --local context=. --local dockerfile=docker \
+        --opt target=sbom \
+        --opt build-arg:QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}" \
+        --secret id=qits-client-id,src=/tmp/qits-client-id \
+        --secret id=qits-client-secret,src=/tmp/qits-client-secret \
+        --output type=local,dest=.sbom
       curl -fsS -X PUT -H 'Content-Type: application/vnd.cyclonedx+json' \
         --data-binary @.sbom/sbom.json \
         "$sbom_base/docker/qits/projects-daemon/-/$version"
@@ -285,7 +325,7 @@ steps:
       # HAND-BUILT WITH printf, in three appends rather than one unreadable format string. Every
       # value goes through `%s`, so nothing in a reference can be read as a printf directive; both
       # $version and $base_version were refused above unless they are CalVer.
-      base_repository="$QITS_REGISTRY/$QITS_IMAGE_REPOSITORY/workspace-base"
+      base_repository="$QITS_BUILD_REGISTRY/$QITS_IMAGE_REPOSITORY/workspace-base"
       agent_root="pkg:docker/qits/project-agent@$version"
       base_purl="pkg:docker/$base_repository@$base_version"
       daemon_purl="pkg:docker/$repository@$version"
