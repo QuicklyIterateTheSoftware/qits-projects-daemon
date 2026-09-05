@@ -63,7 +63,7 @@
 # work on the project's code — build it, test it, run its tooling — and a base that cannot compile
 # the project makes the agent useless at the thing it exists for. Trimming it would also fork the
 # toolchain: two images to keep in step, and a build failure that only reproduces in one of them.
-ARG BASE=qits/workspace-base:2026.902.143920
+ARG BASE=qits/workspace-base:2026.904.223651
 ARG DAEMON_VERSION=latest
 ARG DAEMON_IMAGE=qits/projects-daemon:${DAEMON_VERSION}
 
