@@ -1,6 +1,7 @@
 package eu.wohlben.qits.projectsdaemon;
 
 import eu.wohlben.qits.projectsdaemon.agents.AgentDefaults;
+import eu.wohlben.qits.projectsdaemon.agents.AgentDesk;
 import eu.wohlben.qits.projectsdaemon.agents.AgentLaunchMode;
 import eu.wohlben.qits.projectsdaemon.agents.AgentLaunchRequest;
 import eu.wohlben.qits.projectsdaemon.agents.AgentLaunchService;
@@ -531,6 +532,7 @@ public class ProjectsApi {
     JsonObject json = jsonBody(body);
     return new AgentLaunchRequest(
         parseEnum(json.getString("scope"), AgentMcpScope::valueOf, "scope"),
+        parseEnum(json.getString("desk"), AgentDesk::valueOf, "desk"),
         parseEnum(json.getString("mode"), AgentLaunchMode::valueOf, "mode"),
         json.getString("initialContext"),
         json.getString("resumeSessionId"),

@@ -57,8 +57,8 @@ public class ClaudeCodeAgent extends CodingAgent {
   }
 
   /**
-   * Appends the session flags, the model, the MCP config, the allowlist, the session-report hook and
-   * the skip-permissions flag.
+   * Appends the session flags, the model, the system-prompt appendix, the MCP config, the allowlist,
+   * the session-report hook and the skip-permissions flag.
    */
   private void appendFlags(StringBuilder command) {
     validateSessionConfiguration();
@@ -72,6 +72,12 @@ public class ClaudeCodeAgent extends CodingAgent {
     }
     if (model != null && !model.isBlank()) {
       command.append(" --model ").append(shellQuote(model));
+    }
+    if (systemPromptAppendix != null && !systemPromptAppendix.isBlank()) {
+      // --append-system-prompt, not --system-prompt: the harness's own prompt is what makes the
+      // tools and the checkout usable, and replacing it to add a desk's steering would cost far
+      // more than it buys.
+      command.append(" --append-system-prompt ").append(shellQuote(systemPromptAppendix));
     }
     if (!mcpServers.isEmpty()) {
       JsonObject servers = new JsonObject();

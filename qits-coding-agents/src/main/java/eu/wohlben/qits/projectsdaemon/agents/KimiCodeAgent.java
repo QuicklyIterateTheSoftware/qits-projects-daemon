@@ -41,6 +41,21 @@ public class KimiCodeAgent extends CodingAgent {
    */
   private static final String KIMI_SESSION_PATTERN = "session_[A-Za-z0-9_-]{1,128}";
 
+  /**
+   * <strong>A deliberate no-op.</strong> Kimi Code has no counterpart to Claude's {@code
+   * --append-system-prompt} on either of its channels — no flag on the CLI, no field on the ACP
+   * {@code session/new} — so a desk's steering text has nowhere to go and is dropped here rather
+   * than rendered into something that only looks like it works. The override exists so the drop is
+   * <em>stated</em>: a silently unstored field would make a Kimi tickets desk read as configured
+   * while the session behaved like the default one, which is exactly the failure a launch-time
+   * asymmetry should not be allowed to hide. A Kimi desk is therefore steered by its tools and its
+   * name alone. Give this a body the day the harness grows the seam.
+   */
+  @Override
+  public CodingAgent appendSystemPrompt(String text) {
+    return this;
+  }
+
   @Override
   protected boolean isSessionIdValid(String value) {
     if (value == null) {

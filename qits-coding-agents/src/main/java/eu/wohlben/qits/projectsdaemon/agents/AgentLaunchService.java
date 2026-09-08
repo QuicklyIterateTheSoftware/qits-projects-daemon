@@ -89,16 +89,23 @@ public final class AgentLaunchService {
    * prompts before changing anything. Names are the agent's MCP tool ids: {@code
    * mcp__<server>__<tool>}.
    *
-   * <p>The server carries two surfaces, so this list does too: the repository tools and the epic
-   * ones a refinement session drafts through. {@code list_epics} and {@code get_epic} are the survey
-   * the agent has to make before it can tell "extend this draft" from "propose a new epic", and
-   * pre-approving them is the same call as pre-approving {@code listRepositories}. Every epic
-   * <em>write</em> — {@code propose_epic} and the feature/task mutators — stays off the list and
-   * still prompts, because a drafted plan is a change to the project.
+   * <p>The server carries three surfaces, so this list does too: the repository tools, the epic ones
+   * a refinement session drafts through, and the ticket ones the tickets desk triages through.
+   * {@code list_epics} and {@code get_epic} are the survey the agent has to make before it can tell
+   * "extend this draft" from "propose a new epic", and pre-approving them is the same call as
+   * pre-approving {@code listRepositories}. {@code list_tickets} and {@code get_ticket} are the
+   * exact parallel one surface down — the survey that tells "this is already filed" from "this is
+   * new", made before every intake — and {@code get_ticket} returns the comment thread too, so the
+   * whole conversation reads without a prompt.
    *
-   * <p>The snake_case half is not a slip: the epic tools declare those names on the qits-projects
-   * side, and the id here must match the declared name character for character or the pre-approval
-   * silently matches nothing.
+   * <p>Every <em>write</em> stays off the list and still prompts, on both surfaces and for the same
+   * reason: {@code propose_epic} and the feature/task mutators change the project's plan, and {@code
+   * create_ticket} / {@code update_ticket} / {@code transition_ticket} / the comment writers change
+   * its record of work. Surveying is free; filing is not.
+   *
+   * <p>The snake_case half is not a slip: the epic and ticket tools declare those names on the
+   * qits-projects side, and the id here must match the declared name character for character or the
+   * pre-approval silently matches nothing.
    */
   private static final List<String> READ_ONLY_REPOSITORY_TOOLS =
       List.of(
@@ -110,7 +117,45 @@ public final class AgentLaunchService {
           "mcp__repository__listActions",
           "mcp__repository__taskPrompt",
           "mcp__repository__list_epics",
-          "mcp__repository__get_epic");
+          "mcp__repository__get_epic",
+          "mcp__repository__list_tickets",
+          "mcp__repository__get_ticket");
+
+  /**
+   * The steering an {@link AgentDesk#TICKETS} launch carries, appended to the harness's own system
+   * prompt. It names the desk, the tools it works through, and the two things a triage session gets
+   * wrong without being told: that a ticket's description has to say how to <em>see</em> the
+   * problem, and that resolving is reversible, so nothing about a ticket needs guarding as if it
+   * were final.
+   *
+   * <p>The last line is the boundary between the two desks. A tickets session that meets something
+   * plan-shaped must hand it back rather than file an epic from here: an epic is drafted against the
+   * project's plan, by a session steered at the plan, and one written as a side effect of triage
+   * lands with none of that context.
+   *
+   * <p>A Java text block rather than a classpath resource, because this module is framework-free and
+   * has no resources directory — deliberately, see {@link ClaudeCodeAgent}'s class javadoc: a prompt
+   * is embedded as a shell-quoted argument, so it can be a literal without a side file, and a
+   * literal is what a unit test can assert byte for byte.
+   */
+  static final String TICKETS_DESK_PROMPT =
+      """
+      You are this project's tickets front desk: intake and triage for the small-scoped work \
+      that sits beside the epic plans — bugs and improvements.
+
+      Work through the repository MCP server's ticket tools. Survey with list_tickets and \
+      get_ticket before anything else; a ticket carries its own comment thread, so get_ticket \
+      is the whole conversation and not just the fields. File with create_ticket, typed BUG or \
+      IMPROVEMENT, and say in the description how to see the problem, not only that it exists. \
+      Assign with update_ticket. Discuss on the thread with add_ticket_comment, and correct \
+      your own notes with update_ticket_comment rather than posting a second one after the \
+      first. Resolve with transition_ticket once the work is confirmed done, and reopen the \
+      same way when it turns out not to be: resolving is reversible, and nothing about a ticket \
+      freezes.
+
+      When something is too big for a ticket — when it needs a plan rather than a fix — say so \
+      and point at the epics desk. Do not file an epic from here.\
+      """;
 
   /** Kimi session ids are opaque {@code session_}-prefixed path-safe slugs. */
   private static final String KIMI_SESSION_PATTERN = "session_[A-Za-z0-9_-]{1,128}";
@@ -189,7 +234,7 @@ public final class AgentLaunchService {
     }
 
     PinnedSession pinned = pinSession(request.resumeSessionId(), request.fork(), type);
-    LaunchSpec spec = renderChat(request.scope(), pinned, type);
+    LaunchSpec spec = renderChat(request.scope(), request.deskOrDefault(), pinned, type);
     // Claude drives chat over stream-json (null ⇒ the default transport); Kimi has no stdin chat,
     // so its chat rides an in-JVM ACP client with the scoped MCP servers carried on session/new.
     ChatProtocolFactory protocolFactory =
@@ -200,7 +245,7 @@ public final class AgentLaunchService {
 
     Command command =
         commands.launchChat(
-            nameFor(request.scope(), type),
+            nameFor(request.scope(), request.deskOrDefault(), type),
             spec.script(),
             spec.environment(),
             pinned.commandId(),
@@ -235,7 +280,10 @@ public final class AgentLaunchService {
     }
 
     PinnedSession pinned = pinSession(null, false, type);
-    LaunchSpec spec = renderAutonomousChat(AgentMcpScope.REPOSITORY, pinned, type);
+    // Composed flows are the epic desk's: the run fetches a drafted task prompt and implements it,
+    // which is the plan surface. Nothing composes a tickets run.
+    LaunchSpec spec =
+        renderAutonomousChat(AgentMcpScope.REPOSITORY, AgentDesk.EPICS, pinned, type);
     ChatProtocolFactory protocolFactory =
         type == AgentType.KIMI
             ? process ->
@@ -279,9 +327,10 @@ public final class AgentLaunchService {
     String seed =
         request.deliverTaskPrompt() ? TASK_PROMPT_BOOTSTRAP : request.initialContext();
     PinnedSession pinned = pinSession(request.resumeSessionId(), request.fork(), type);
-    LaunchSpec spec = renderInteractive(request.scope(), seed, pinned, type);
+    LaunchSpec spec =
+        renderInteractive(request.scope(), request.deskOrDefault(), seed, pinned, type);
     return commands.launchAgent(
-        interactiveNameFor(request.scope(), type),
+        interactiveNameFor(request.scope(), request.deskOrDefault(), type),
         spec.script(),
         true,
         spec.environment(),
@@ -464,16 +513,20 @@ public final class AgentLaunchService {
   }
 
   /**
-   * Renders the stream-json chat launch for {@code scope} with its MCP servers attached and {@code
-   * HOME} pointed at the shared credential volume. Package-visible so the credential overlay is
-   * assertable without spawning anything.
+   * Renders the stream-json chat launch for {@code scope} with its MCP servers attached, {@code
+   * desk}'s steering appended to the system prompt, and {@code HOME} pointed at the shared
+   * credential volume. Package-visible so the credential overlay is assertable without spawning
+   * anything.
    */
-  LaunchSpec renderChat(AgentMcpScope scope, PinnedSession pinned, AgentType agentType) {
+  LaunchSpec renderChat(
+      AgentMcpScope scope, AgentDesk desk, PinnedSession pinned, AgentType agentType) {
     CodingAgent agent = CodingAgentFactory.ofType(agentType);
     for (ScopedMcp server : serversFor(scope)) {
       agent.mcpServer(server.key(), McpServers.httpMcp(server.url()));
     }
-    return withSession(withAgentHome(agent, agentType), pinned).skipPermissions().chat();
+    return withDesk(withSession(withAgentHome(agent, agentType), pinned), desk)
+        .skipPermissions()
+        .chat();
   }
 
   /**
@@ -518,7 +571,8 @@ public final class AgentLaunchService {
    * {@code taskPrompt} is reachable), the credential overlay and skip-permissions — like {@link
    * #renderChat}, but with each server URL read-only marked.
    */
-  LaunchSpec renderAutonomousChat(AgentMcpScope scope, PinnedSession pinned, AgentType agentType) {
+  LaunchSpec renderAutonomousChat(
+      AgentMcpScope scope, AgentDesk desk, PinnedSession pinned, AgentType agentType) {
     CodingAgent agent = CodingAgentFactory.ofType(agentType);
     for (ScopedMcp server : serversFor(scope)) {
       // Unattended first turn under skip-permissions: mark the server read-only so the host's
@@ -527,7 +581,9 @@ public final class AgentLaunchService {
       // its own git work happens inside this container, not via host-side MCP mutations.
       agent.mcpServer(server.key(), McpServers.httpMcp(readOnlyMarked(server.url())));
     }
-    return withSession(withAgentHome(agent, agentType), pinned).skipPermissions().chat();
+    return withDesk(withSession(withAgentHome(agent, agentType), pinned), desk)
+        .skipPermissions()
+        .chat();
   }
 
   /**
@@ -544,7 +600,11 @@ public final class AgentLaunchService {
    * renders the TUI; the readable conversation is the imported transcript.
    */
   LaunchSpec renderInteractive(
-      AgentMcpScope scope, String initialContext, PinnedSession pinned, AgentType agentType) {
+      AgentMcpScope scope,
+      AgentDesk desk,
+      String initialContext,
+      PinnedSession pinned,
+      AgentType agentType) {
     CodingAgent agent = CodingAgentFactory.ofType(agentType);
     for (ScopedMcp server : serversFor(scope)) {
       agent.mcpServer(server.key(), McpServers.httpMcp(server.url()));
@@ -552,7 +612,33 @@ public final class AgentLaunchService {
     if (initialContext != null && !initialContext.isBlank()) {
       agent.initialContext(initialContext);
     }
-    return withSession(withAgentHome(agent, agentType), pinned).skipPermissions().start();
+    return withDesk(withSession(withAgentHome(agent, agentType), pinned), desk)
+        .skipPermissions()
+        .start();
+  }
+
+  /**
+   * Appends {@code desk}'s steering to the agent's system prompt, if it has any. {@link
+   * AgentDesk#EPICS} has none — deliberately, and it is the reason the desk axis could be added
+   * without touching a single running launch: the epics desk renders exactly the command it rendered
+   * before the enum existed, down to the byte.
+   */
+  private CodingAgent withDesk(CodingAgent agent, AgentDesk desk) {
+    String prompt = systemPromptFor(desk);
+    return prompt == null ? agent : agent.appendSystemPrompt(prompt);
+  }
+
+  /**
+   * The system-prompt appendix a desk steers with, or {@code null} for a desk that steers with
+   * nothing. The epics desk is steered by the tools it was given and by the container it runs in,
+   * which is how this whole surface worked before there was a second desk; only the tickets desk has
+   * to say what it is, because it shares every one of those tools with the desk beside it.
+   */
+  static String systemPromptFor(AgentDesk desk) {
+    return switch (desk) {
+      case EPICS -> null;
+      case TICKETS -> TICKETS_DESK_PROMPT;
+    };
   }
 
   /**
@@ -606,28 +692,47 @@ public final class AgentLaunchService {
     };
   }
 
-  private String nameFor(AgentMcpScope scope, AgentType agentType) {
+  private String nameFor(AgentMcpScope scope, AgentDesk desk, AgentType agentType) {
     return harnessName(
         scope,
+        desk,
         switch (agentType) {
           case CLAUDE -> "Claude Code";
           case KIMI -> "Kimi Code";
         });
   }
 
-  private String interactiveNameFor(AgentMcpScope scope, AgentType agentType) {
+  private String interactiveNameFor(AgentMcpScope scope, AgentDesk desk, AgentType agentType) {
     return harnessName(
         scope,
+        desk,
         switch (agentType) {
           case CLAUDE -> "Claude Code terminal";
           case KIMI -> "Kimi Code terminal";
         });
   }
 
-  private static String harnessName(AgentMcpScope scope, String harnessLabel) {
-    return switch (scope) {
-      case REPOSITORY -> harnessLabel + " (repository MCP)";
-      case PROJECT -> harnessLabel + " (project MCP)";
+  /**
+   * The command's name — and, for {@link AgentDesk#TICKETS}, a <strong>cross-repo contract</strong>.
+   * The frontend segregates a project's sessions into the two desks by matching {@code
+   * " (tickets desk)"} in this name, because a command carries no desk field of its own: the desk is
+   * a launch-time choice and the command registry records what was launched, not why. Changing this
+   * suffix therefore moves every ticket session into the epics list without failing anything.
+   *
+   * <p>{@link AgentDesk#EPICS} keeps the scope-derived names it has always had — the frontend's
+   * "everything that is not a tickets desk" — so nothing that was running gets renamed. The desk wins
+   * over the scope where they would both speak: a tickets session says which desk it is, not how its
+   * one MCP URL was narrowed, because the narrowing is not what a reader of the session list is
+   * telling sessions apart by.
+   */
+  private static String harnessName(AgentMcpScope scope, AgentDesk desk, String harnessLabel) {
+    return switch (desk) {
+      case TICKETS -> harnessLabel + " (tickets desk)";
+      case EPICS ->
+          switch (scope) {
+            case REPOSITORY -> harnessLabel + " (repository MCP)";
+            case PROJECT -> harnessLabel + " (project MCP)";
+          };
     };
   }
 

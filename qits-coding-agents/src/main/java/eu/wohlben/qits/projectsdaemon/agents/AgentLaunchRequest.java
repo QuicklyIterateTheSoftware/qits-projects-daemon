@@ -8,6 +8,8 @@ package eu.wohlben.qits.projectsdaemon.agents;
  * request.
  *
  * @param scope which MCP servers to attach, and how they are narrowed. Required.
+ * @param desk which front desk the session opens — what it is steered at; null means {@link
+ *     AgentDesk#EPICS}. Orthogonal to {@code scope}: the scope addresses, the desk steers.
  * @param mode chat or the interactive TUI; null means {@link AgentLaunchMode#CHAT}
  * @param initialContext the seed turn, or null for none
  * @param resumeSessionId a session of this container to continue, or null for a fresh one
@@ -21,6 +23,7 @@ package eu.wohlben.qits.projectsdaemon.agents;
  */
 public record AgentLaunchRequest(
     AgentMcpScope scope,
+    AgentDesk desk,
     AgentLaunchMode mode,
     String initialContext,
     String resumeSessionId,
@@ -30,5 +33,9 @@ public record AgentLaunchRequest(
 
   public AgentLaunchMode modeOrDefault() {
     return mode == null ? AgentLaunchMode.CHAT : mode;
+  }
+
+  public AgentDesk deskOrDefault() {
+    return desk == null ? AgentDesk.EPICS : desk;
   }
 }

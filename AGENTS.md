@@ -151,13 +151,13 @@ went and the seams that consumed it were answered differently:
   `REPOSITORY`.
 - `READ_ONLY_ACTION_TOOLS` and `READ_ONLY_OBSERVABILITY_TOOLS` allowlists, with their servers.
 
-**A launch attaches exactly one MCP server**, `repository`, and it is the one carrying the epic
-tools — the whole reason this container exists. Excluding the workspace world is deliberate: a
-refinement agent's job is the project's plan, not workspace actions or another service's telemetry.
-Nothing can put the others back at runtime either. Claude is launched with `--strict-mcp-config`, so
-the rendered `--mcp-config` is the complete set and the shared `/claude-home` volume's own MCP
-entries are ignored; Kimi gets a launch-local `mcp.json` in a throwaway `KIMI_CODE_HOME`. Both are
-asserted in `AgentLaunchServiceTest`.
+**A launch attaches exactly one MCP server**, `repository`, and it is the one carrying the epic and
+ticket tools — the whole reason this container exists. Excluding the workspace world is deliberate: a
+project agent's job is the project's plan and the work beside it, not workspace actions or another
+service's telemetry. Nothing can put the others back at runtime either. Claude is launched with
+`--strict-mcp-config`, so the rendered `--mcp-config` is the complete set and the shared
+`/claude-home` volume's own MCP entries are ignored; Kimi gets a launch-local `mcp.json` in a
+throwaway `KIMI_CODE_HOME`. Both are asserted in `AgentLaunchServiceTest`.
 
 **Other.**
 
@@ -167,6 +167,44 @@ asserted in `AgentLaunchServiceTest`.
   (`<gitBase>/<projectId>/<repoName>`) because that is qits-githost's public repository address and
   a wrapper's relative submodule urls resolve to sibling names below the same project segment.
 - `--branch` on the clone. The wrapper is cloned at its default branch.
+
+## The two axes of a launch
+
+A launch is steered and addressed separately, and the two are different enums on
+`AgentLaunchRequest`. Folding them together would mean a desk could not be narrowed to a repository,
+or that narrowing to a repository quietly changed what the agent was for.
+
+    scope   AgentMcpScope   PROJECT | REPOSITORY   how narrow the one MCP URL is
+    desk    AgentDesk       EPICS | TICKETS        what the session is for
+
+`EPICS` is the default and **renders the pre-desk launch byte for byte** — no system prompt, and the
+scope-derived command names (`… (repository MCP)` / `… (project MCP)`) it always had. That
+equivalence is the ground the axis was added on and it is asserted, not assumed.
+
+`TICKETS` opens the intake-and-triage desk on the same container and the same server: the ticket
+tools were always there, so a desk is a steering choice rather than a second wiring. It carries a
+system-prompt appendix and it names its command **`<harness> (tickets desk)`**. That substring is a
+**contract with the frontend**, which segregates a project's sessions into the two desks by matching
+it — a `Command` has no desk field, because the registry records what was launched, not why.
+Changing the suffix moves every ticket session into the epics list without failing anything.
+
+**The system-prompt seam.** `CodingAgent.appendSystemPrompt` is the steering channel;
+`AgentLaunchService.systemPromptFor` maps a desk onto it and answers `null` for `EPICS`. Claude
+renders it as `--append-system-prompt` — appended, never replacing the harness's own prompt, which is
+what makes the tools and the checkout usable in the first place. **Kimi has no counterpart** on
+either channel (no CLI flag, no ACP `session/new` field) and overrides the setter to an explicit,
+documented no-op: a Kimi desk is steered by its tools and its name alone. Leaving the field silently
+unstored would make a Kimi tickets desk read as configured while behaving like the default one.
+
+The prompt is a text block on `AgentLaunchService`, beside `TASK_PROMPT_BOOTSTRAP`, not a classpath
+resource — this module is framework-free and has no resources directory. A prompt is embedded as a
+shell-quoted argument (see `ClaudeCodeAgent`), so a literal needs no side file and a test can assert
+it byte for byte.
+
+The **pre-approved reads** follow the desks: `list_tickets` and `get_ticket` join `list_epics` and
+`get_epic` on `READ_ONLY_REPOSITORY_TOOLS`, because a desk has to survey before it can tell an intake
+from a duplicate, and `get_ticket` brings the comment thread with it. Every write on either surface
+stays off the list and still prompts.
 
 ## Derivations, and which ones are honest
 

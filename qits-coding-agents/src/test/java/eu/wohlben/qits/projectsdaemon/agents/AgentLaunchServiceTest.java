@@ -256,7 +256,11 @@ class AgentLaunchServiceTest {
   }
 
   private static AgentLaunchRequest chat(AgentMcpScope scope) {
-    return new AgentLaunchRequest(scope, AgentLaunchMode.CHAT, null, null, false, false, null);
+    return chat(scope, null);
+  }
+
+  private static AgentLaunchRequest chat(AgentMcpScope scope, AgentDesk desk) {
+    return new AgentLaunchRequest(scope, desk, AgentLaunchMode.CHAT, null, null, false, false, null);
   }
 
   // --- MCP scoping ------------------------------------------------------------------------------
@@ -322,6 +326,9 @@ class AgentLaunchServiceTest {
           servers.get(0).allowedTools().stream().anyMatch(t -> t.contains("create")),
           "a mutating tool must still prompt");
       assertFalse(
+          servers.get(0).allowedTools().stream().anyMatch(t -> t.contains("transition")),
+          "moving a ticket's state is a write like any other");
+      assertFalse(
           servers.get(0).allowedTools().stream().anyMatch(t -> t.contains("integrateBranch")));
     }
 
@@ -340,6 +347,23 @@ class AgentLaunchServiceTest {
     }
 
     @Test
+    void theTicketSurveyIsPreApprovedAndTheTicketWritesAreNot() {
+      // The exact parallel to the epic survey one surface down: the tickets desk has to read what
+      // is already filed before it can tell an intake from a duplicate, and get_ticket brings the
+      // comment thread with it. Filing, assigning, commenting and resolving all change the
+      // project's record of work, so all four still prompt.
+      List<String> allowed = service().serversFor(AgentMcpScope.PROJECT).get(0).allowedTools();
+
+      assertTrue(allowed.contains("mcp__repository__list_tickets"), allowed.toString());
+      assertTrue(allowed.contains("mcp__repository__get_ticket"), allowed.toString());
+      assertFalse(allowed.contains("mcp__repository__create_ticket"));
+      assertFalse(allowed.contains("mcp__repository__update_ticket"));
+      assertFalse(allowed.contains("mcp__repository__transition_ticket"));
+      assertFalse(allowed.contains("mcp__repository__add_ticket_comment"));
+      assertFalse(allowed.contains("mcp__repository__update_ticket_comment"));
+    }
+
+    @Test
     void theWorkspaceWorldServersAreNotWiredIntoALaunch() {
       // The workspace daemon attaches actions/repository/observability. A refinement agent's job is
       // the project's plan, so only the epic-carrying server is attached — and --strict-mcp-config
@@ -347,7 +371,10 @@ class AgentLaunchServiceTest {
       AgentLaunchService service = service();
       AgentLaunchService.PinnedSession pinned = service.pinSession(null, false, AgentType.CLAUDE);
 
-      String script = service.renderChat(AgentMcpScope.PROJECT, pinned, AgentType.CLAUDE).script();
+      String script =
+          service
+              .renderChat(AgentMcpScope.PROJECT, AgentDesk.EPICS, pinned, AgentType.CLAUDE)
+              .script();
 
       assertTrue(script.contains("--strict-mcp-config"), script);
       assertEquals(
@@ -373,7 +400,8 @@ class AgentLaunchServiceTest {
       AgentLaunchService service = service();
       AgentLaunchService.PinnedSession pinned = service.pinSession(null, false, AgentType.CLAUDE);
 
-      LaunchSpec spec = service.renderChat(AgentMcpScope.REPOSITORY, pinned, AgentType.CLAUDE);
+      LaunchSpec spec =
+          service.renderChat(AgentMcpScope.REPOSITORY, AgentDesk.EPICS, pinned, AgentType.CLAUDE);
 
       assertTrue(spec.script().contains("--input-format stream-json"));
       assertTrue(spec.script().contains("repositoryId=" + REPO));
@@ -400,7 +428,8 @@ class AgentLaunchServiceTest {
       AgentLaunchService.PinnedSession pinned = service.pinSession(null, false, AgentType.CLAUDE);
 
       LaunchSpec spec =
-          service.renderAutonomousChat(AgentMcpScope.PROJECT, pinned, AgentType.CLAUDE);
+          service.renderAutonomousChat(
+              AgentMcpScope.PROJECT, AgentDesk.EPICS, pinned, AgentType.CLAUDE);
 
       assertEquals(
           1,
@@ -414,7 +443,8 @@ class AgentLaunchServiceTest {
       AgentLaunchService.PinnedSession pinned = service.pinSession(null, false, AgentType.CLAUDE);
 
       LaunchSpec spec =
-          service.renderInteractive(AgentMcpScope.REPOSITORY, "do the thing", pinned, AgentType.CLAUDE);
+          service.renderInteractive(
+              AgentMcpScope.REPOSITORY, AgentDesk.EPICS, "do the thing", pinned, AgentType.CLAUDE);
 
       assertTrue(spec.script().startsWith("exec claude 'do the thing'"), spec.script());
       assertTrue(spec.interactive());
@@ -425,7 +455,8 @@ class AgentLaunchServiceTest {
       AgentLaunchService service = service();
       AgentLaunchService.PinnedSession pinned = service.pinSession(null, false, AgentType.KIMI);
 
-      LaunchSpec spec = service.renderChat(AgentMcpScope.REPOSITORY, pinned, AgentType.KIMI);
+      LaunchSpec spec =
+          service.renderChat(AgentMcpScope.REPOSITORY, AgentDesk.EPICS, pinned, AgentType.KIMI);
 
       assertFalse(
           spec.environment().containsKey("HOME"), "Kimi reads KIMI_CODE_HOME, set container-wide");
@@ -438,7 +469,10 @@ class AgentLaunchServiceTest {
       AgentLaunchService service = service();
       AgentLaunchService.PinnedSession pinned = service.pinSession(null, false, AgentType.CLAUDE);
 
-      String script = service.renderChat(AgentMcpScope.REPOSITORY, pinned, AgentType.CLAUDE).script();
+      String script =
+          service
+              .renderChat(AgentMcpScope.REPOSITORY, AgentDesk.EPICS, pinned, AgentType.CLAUDE)
+              .script();
 
       assertTrue(script.contains("\"SessionStart\""), "lineage is not optional");
       assertFalse(script.contains("\"UserPromptSubmit\""), "the turn-boundary hooks are");
@@ -452,6 +486,125 @@ class AgentLaunchServiceTest {
           CLAUDE_MOUNT + "/.kimi-code",
           service().renderLogin(AgentType.KIMI).environment().get("KIMI_CODE_HOME"));
       assertEquals("exec kimi login", service().renderLogin(AgentType.KIMI).script());
+    }
+  }
+
+  // --- the desks --------------------------------------------------------------------------------
+
+  @Nested
+  class Desks {
+
+    /** The appendix as the shell sees it — the desk prompt's apostrophes escaped in place. */
+    private static final String QUOTED_TICKETS_PROMPT =
+        "--append-system-prompt 'You are this project'\\''s tickets front desk:";
+
+    @Test
+    void theEpicsDeskAppendsNothingAtAll() {
+      // The equivalence the desk axis was added on: an epics launch renders the command it
+      // rendered before AgentDesk existed, so nothing already running was changed by adding it.
+      AgentLaunchService service = service();
+      AgentLaunchService.PinnedSession pinned = service.pinSession(null, false, AgentType.CLAUDE);
+
+      assertNull(AgentLaunchService.systemPromptFor(AgentDesk.EPICS));
+      assertFalse(
+          service
+              .renderChat(AgentMcpScope.REPOSITORY, AgentDesk.EPICS, pinned, AgentType.CLAUDE)
+              .script()
+              .contains("--append-system-prompt"));
+      assertFalse(
+          service
+              .renderInteractive(
+                  AgentMcpScope.PROJECT, AgentDesk.EPICS, null, pinned, AgentType.CLAUDE)
+              .script()
+              .contains("--append-system-prompt"));
+    }
+
+    @Test
+    void aRequestWithoutADeskOpensTheEpicsDesk() {
+      assertEquals(AgentDesk.EPICS, chat(AgentMcpScope.PROJECT, null).deskOrDefault());
+
+      service().launchChat(chat(AgentMcpScope.PROJECT));
+
+      assertEquals("Claude Code (project MCP)", commands.last().name(), "and it is named as before");
+    }
+
+    @Test
+    void aTicketsChatCarriesTheDeskPromptShellQuoted() {
+      AgentLaunchService service = service();
+      AgentLaunchService.PinnedSession pinned = service.pinSession(null, false, AgentType.CLAUDE);
+
+      String script =
+          service
+              .renderChat(AgentMcpScope.REPOSITORY, AgentDesk.TICKETS, pinned, AgentType.CLAUDE)
+              .script();
+
+      assertTrue(script.contains(QUOTED_TICKETS_PROMPT), script);
+      assertTrue(
+          script.contains("list_tickets and get_ticket before anything else"),
+          "the survey instruction is what makes the pre-approved reads worth having");
+      assertTrue(script.contains("point at the epics desk. Do not file an epic from here."), script);
+    }
+
+    @Test
+    void aTicketsInteractiveLaunchCarriesTheSameAppendix() {
+      // The TUI is the same desk, so the steering cannot be a chat-only affordance.
+      AgentLaunchService service = service();
+      AgentLaunchService.PinnedSession pinned = service.pinSession(null, false, AgentType.CLAUDE);
+
+      String script =
+          service
+              .renderInteractive(
+                  AgentMcpScope.REPOSITORY, AgentDesk.TICKETS, "triage this", pinned, AgentType.CLAUDE)
+              .script();
+
+      assertTrue(script.startsWith("exec claude 'triage this'"), script);
+      assertTrue(script.contains(QUOTED_TICKETS_PROMPT), script);
+    }
+
+    @Test
+    void aTicketsLaunchNamesItselfAfterTheDeskRatherThanTheScope() {
+      // A CONTRACT with the frontend, which segregates the two desks' sessions by matching this
+      // substring — the command carries no desk field of its own.
+      service().launchChat(chat(AgentMcpScope.REPOSITORY, AgentDesk.TICKETS));
+      assertEquals("Claude Code (tickets desk)", commands.last().name());
+
+      service().launchChat(chat(AgentMcpScope.PROJECT, AgentDesk.TICKETS));
+      assertEquals(
+          "Claude Code (tickets desk)",
+          commands.last().name(),
+          "the scope narrows the URL; it does not name the desk");
+
+      service()
+          .launch(
+              new AgentLaunchRequest(
+                  AgentMcpScope.REPOSITORY,
+                  AgentDesk.TICKETS,
+                  AgentLaunchMode.INTERACTIVE,
+                  null,
+                  null,
+                  false,
+                  false,
+                  null));
+      assertEquals("Claude Code terminal (tickets desk)", commands.last().name());
+    }
+
+    @Test
+    void kimiOpensTheDeskWithoutTheAppendixBecauseItHasNowhereToPutIt() {
+      // The documented asymmetry: Kimi has no --append-system-prompt and no ACP field for one, so
+      // its tickets desk is steered by its tools and its name alone. It must still be that desk.
+      defaultType = AgentType.KIMI;
+      AgentLaunchService service = service();
+      AgentLaunchService.PinnedSession pinned = service.pinSession(null, false, AgentType.KIMI);
+
+      assertEquals(
+          "exec kimi acp",
+          service
+              .renderChat(AgentMcpScope.REPOSITORY, AgentDesk.TICKETS, pinned, AgentType.KIMI)
+              .script());
+
+      service().launchChat(chat(AgentMcpScope.REPOSITORY, AgentDesk.TICKETS));
+
+      assertEquals("Kimi Code (tickets desk)", commands.last().name());
     }
   }
 
@@ -536,6 +689,7 @@ class AgentLaunchServiceTest {
               .launchChat(
                   new AgentLaunchRequest(
                       AgentMcpScope.REPOSITORY,
+                      null,
                       AgentLaunchMode.CHAT,
                       null,
                       KIMI_SESSION,
@@ -587,7 +741,14 @@ class AgentLaunchServiceTest {
       service()
           .launchChat(
               new AgentLaunchRequest(
-                  AgentMcpScope.REPOSITORY, AgentLaunchMode.CHAT, "start here", null, false, false, null));
+                  AgentMcpScope.REPOSITORY,
+                  null,
+                  AgentLaunchMode.CHAT,
+                  "start here",
+                  null,
+                  false,
+                  false,
+                  null));
 
       assertEquals(List.of("start here"), commands.chatSends);
     }
@@ -597,7 +758,14 @@ class AgentLaunchServiceTest {
       service()
           .launchChat(
               new AgentLaunchRequest(
-                  AgentMcpScope.REPOSITORY, AgentLaunchMode.CHAT, "ignored", null, false, true, null));
+                  AgentMcpScope.REPOSITORY,
+                  null,
+                  AgentLaunchMode.CHAT,
+                  "ignored",
+                  null,
+                  false,
+                  true,
+                  null));
 
       assertEquals(
           List.of(AgentLaunchService.TASK_PROMPT_BOOTSTRAP),
@@ -610,7 +778,14 @@ class AgentLaunchServiceTest {
       service()
           .launchChat(
               new AgentLaunchRequest(
-                  AgentMcpScope.REPOSITORY, AgentLaunchMode.CHAT, "   ", null, false, false, null));
+                  AgentMcpScope.REPOSITORY,
+                  null,
+                  AgentLaunchMode.CHAT,
+                  "   ",
+                  null,
+                  false,
+                  false,
+                  null));
 
       assertTrue(commands.chatSends.isEmpty());
     }
@@ -641,6 +816,7 @@ class AgentLaunchServiceTest {
           .launch(
               new AgentLaunchRequest(
                   AgentMcpScope.REPOSITORY,
+                  null,
                   AgentLaunchMode.INTERACTIVE,
                   null,
                   null,
@@ -656,7 +832,8 @@ class AgentLaunchServiceTest {
     void launchDefaultsToChatWhenNoModeIsGiven() {
       service()
           .launch(
-              new AgentLaunchRequest(AgentMcpScope.REPOSITORY, null, null, null, false, false, null));
+              new AgentLaunchRequest(
+                  AgentMcpScope.REPOSITORY, null, null, null, null, false, false, null));
 
       assertEquals(CommandKind.CHAT, commands.last().kind());
     }
@@ -672,6 +849,7 @@ class AgentLaunchServiceTest {
                   .launch(
                       new AgentLaunchRequest(
                           AgentMcpScope.REPOSITORY,
+                          null,
                           AgentLaunchMode.CHAT,
                           null,
                           null,

@@ -43,6 +43,9 @@ public abstract class CodingAgent {
   /** The interactive seed prompt, or null. */
   protected String initialContext;
 
+  /** Steering text appended to the harness's own system prompt, or null. */
+  protected String systemPromptAppendix;
+
   /** Model override for the launched session, or null for the harness default. */
   protected String model;
 
@@ -98,6 +101,19 @@ public abstract class CodingAgent {
   /** Seeds an interactive session with a first prompt (only used by {@link #start()}). */
   public CodingAgent initialContext(String context) {
     this.initialContext = context;
+    return this;
+  }
+
+  /**
+   * Appends {@code text} to the harness's own system prompt, steering every turn of the session
+   * rather than only its first one. Distinct from {@link #initialContext}, which is a user turn: a
+   * seed can be argued away or fall out of the context window, an appendix cannot, which is what a
+   * standing instruction ("you are this desk, work through these tools") needs. Honoured by
+   * harnesses that expose the seam; see {@link KimiCodeAgent#appendSystemPrompt} for the one that
+   * does not.
+   */
+  public CodingAgent appendSystemPrompt(String text) {
+    this.systemPromptAppendix = text;
     return this;
   }
 
