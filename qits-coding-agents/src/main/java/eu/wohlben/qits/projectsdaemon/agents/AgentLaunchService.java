@@ -9,6 +9,7 @@ import eu.wohlben.qits.projectsdaemon.commands.Command;
 import eu.wohlben.qits.projectsdaemon.commands.CommandExitListener;
 import eu.wohlben.qits.projectsdaemon.commands.InvalidCommandRequestException;
 import eu.wohlben.qits.projectsdaemon.commands.ProjectContext;
+import eu.wohlben.qits.projectsdaemon.commands.StreamJsonChatProtocol;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -235,13 +236,13 @@ public final class AgentLaunchService {
 
     PinnedSession pinned = pinSession(request.resumeSessionId(), request.fork(), type);
     LaunchSpec spec = renderChat(request.scope(), request.deskOrDefault(), pinned, type);
-    // Claude drives chat over stream-json (null ⇒ the default transport); Kimi has no stdin chat,
-    // so its chat rides an in-JVM ACP client with the scoped MCP servers carried on session/new.
+    // Claude drives chat over stream-json; Kimi has no stdin chat, so its chat rides an in-JVM ACP
+    // client with the scoped MCP servers carried on session/new.
     ChatProtocolFactory protocolFactory =
         type == AgentType.KIMI
             ? process ->
                 new AcpChatProtocol(process, buildAcpSessionConfig(request.scope(), pinned))
-            : null;
+            : claudeChatProtocol(pinned);
 
     Command command =
         commands.launchChat(
@@ -289,7 +290,7 @@ public final class AgentLaunchService {
             ? process ->
                 new AcpChatProtocol(
                     process, buildAcpSessionConfig(AgentMcpScope.REPOSITORY, pinned, true))
-            : null;
+            : claudeChatProtocol(pinned);
     Command command =
         commands.launchChat(
             name,
@@ -527,6 +528,18 @@ public final class AgentLaunchService {
     return withDesk(withSession(withAgentHome(agent, agentType), pinned), desk)
         .skipPermissions()
         .chat();
+  }
+
+  /**
+   * The Claude chat transport, with Remote Control enabled and named after the checked-out branch —
+   * {@code refining/<slug>}, so a remote session list says which refinement it is looking at instead
+   * of a container hostname. The enable rides the transport rather than the command line because
+   * {@code --remote-control} is dropped by the harness under {@code --print}; see {@link
+   * StreamJsonChatProtocol}. A workspace whose branch is not known yet simply gets no bridge.
+   */
+  private ChatProtocolFactory claudeChatProtocol(PinnedSession pinned) {
+    String name = project.branch();
+    return process -> new StreamJsonChatProtocol(process, pinned.commandId(), name);
   }
 
   /**
