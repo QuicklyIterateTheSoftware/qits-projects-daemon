@@ -1,19 +1,22 @@
 package eu.wohlben.qits.projectsdaemon;
 
-import eu.wohlben.qits.projectsdaemon.agents.AgentAuthStatus;
-import eu.wohlben.qits.projectsdaemon.agents.AgentLaunchService;
-import eu.wohlben.qits.projectsdaemon.agents.AgentSessionQueryService;
-import eu.wohlben.qits.projectsdaemon.agents.AgentSessionStore;
-import eu.wohlben.qits.projectsdaemon.agents.AgentTranscriptService;
-import eu.wohlben.qits.projectsdaemon.agents.AgentTranscriptTailService;
-import eu.wohlben.qits.projectsdaemon.agents.CommandsAgentCommands;
-import eu.wohlben.qits.projectsdaemon.agents.LocalProcessExecutor;
-import eu.wohlben.qits.projectsdaemon.agents.ProcessRunner;
-import eu.wohlben.qits.projectsdaemon.commands.CommandLifecycleService;
-import eu.wohlben.qits.projectsdaemon.commands.CommandLogService;
-import eu.wohlben.qits.projectsdaemon.commands.CommandRegistry;
-import eu.wohlben.qits.projectsdaemon.commands.CommandService;
-import eu.wohlben.qits.projectsdaemon.commands.CommandStore;
+import eu.wohlben.qits.agents.AgentAuthStatus;
+import eu.wohlben.qits.agents.AgentLaunchService;
+import eu.wohlben.qits.agents.AgentSessionQueryService;
+import eu.wohlben.qits.agents.AgentSessionStore;
+import eu.wohlben.qits.agents.AgentSurfaceConfigurations;
+import eu.wohlben.qits.agents.AgentTranscriptService;
+import eu.wohlben.qits.agents.AgentTranscriptTailService;
+import eu.wohlben.qits.agents.CommandsAgentCommands;
+import eu.wohlben.qits.agents.HarnessCapabilities;
+import eu.wohlben.qits.agents.HarnessCapabilityService;
+import eu.wohlben.qits.agents.LocalProcessExecutor;
+import eu.wohlben.qits.agents.ProcessRunner;
+import eu.wohlben.qits.commands.CommandLifecycleService;
+import eu.wohlben.qits.commands.CommandLogService;
+import eu.wohlben.qits.commands.CommandRegistry;
+import eu.wohlben.qits.commands.CommandService;
+import eu.wohlben.qits.commands.CommandStore;
 import eu.wohlben.qits.projectsdaemon.protocol.DaemonCodec;
 import eu.wohlben.qits.projectsdaemon.protocol.DaemonLog;
 import eu.wohlben.qits.projectsdaemon.protocol.DaemonMessage;
@@ -178,6 +181,32 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.agent.default-type")
   Optional<String> agentDefaultType;
 
+  /**
+   * The per-surface agent configuration document qits-projects created this container with, as
+   * bytes ({@code QITS_PROJECTS_DAEMON_AGENT_CONFIGURATION}), and where to materialize it ({@code
+   * …_PATH}). Both or neither; see {@link AgentConfigurationBoot} for why it rides the environment
+   * rather than being mounted, and for what each of the three states means.
+   */
+  @ConfigProperty(name = "qits.projects-daemon.agent-configuration")
+  Optional<String> agentConfiguration;
+
+  @ConfigProperty(name = "qits.projects-daemon.agent-configuration-path")
+  Optional<String> agentConfigurationPath;
+
+  /**
+   * The image build this container runs, for the capability report the editor's dropdowns are keyed
+   * by.
+   *
+   * <p><b>Blank is the ordinary case and it is not a gap.</b> Nothing tells a container its own
+   * image tag today — the daemon's own {@code build.version} is this repository's release, which is
+   * a different thing from the {@code qits/project-agent} calver the container was created from —
+   * and the host that <em>chose</em> that pin fills a blank in from it when it records the report.
+   * The key exists so a deployment that does inject the value wins over that fallback, which is the
+   * rule qits-projects' relay states: a daemon that names it wins, always.
+   */
+  @ConfigProperty(name = "qits.projects-daemon.image-version")
+  Optional<String> imageVersion;
+
   /** Whether launches wire the turn-boundary activity hooks; the lineage hook is unconditional. */
   @ConfigProperty(name = "qits.agent.activity-tracking-enabled", defaultValue = "true")
   boolean agentActivityTrackingEnabled;
@@ -234,6 +263,16 @@ public class ControlSocket {
   private final AgentSessionStore agentSessionStore = new AgentSessionStore();
 
   /**
+   * What this container was created to run its two surfaces ({@code project.epics}, {@code
+   * project.tickets}) as. Read <b>once</b>, at boot, in {@link #start()} — a container keeps what it
+   * was born with, so re-reading it per launch would be file IO for a value that cannot change.
+   * Defaults to the library's shipped constants, which is what a container created before the
+   * configuration epic shipped runs on.
+   */
+  private volatile AgentSurfaceConfigurations surfaceConfigurations =
+      AgentSurfaceConfigurations.shipped();
+
+  /**
    * Ensures the autonomous self-provision runs at most once per daemon lifetime.
    *
    * <p><b>There is no re-provision path, deliberately not invented here.</b> This latch holds for
@@ -279,6 +318,12 @@ public class ControlSocket {
   public void start() {
     projectId = projectIdConfig.orElse("");
     repoName = repoNameConfig.orElse("");
+    // Before anything is started, and deliberately so: a document that cannot be trusted must fail
+    // where an operator sees it — at boot, naming the offending key — rather than at the first
+    // launch of the one surface that was wrong. Both refusals throw out of here and out of Main,
+    // which is what "fails visibly rather than idling while looking healthy" means for this image.
+    surfaceConfigurations =
+        AgentConfigurationBoot.materialize(agentConfiguration, agentConfigurationPath);
     if (url.isEmpty() || url.get().isBlank()) {
       LOG.warn(
           "No qits.projects-daemon.url configured — projects-daemon is idle (the container stays"
@@ -346,7 +391,7 @@ public class ControlSocket {
    * that never binds. Binding keeps the routes reachable, and they degrade honestly against a
    * missing or partial checkout: the command list is empty, no action is declared, the recorded
    * commit is blank, and anything that would have to run in the checkout answers 503 with the
-   * reason ({@link eu.wohlben.qits.projectsdaemon.commands.CheckoutUnavailableException}) instead
+   * reason ({@link eu.wohlben.qits.commands.CheckoutUnavailableException}) instead
    * of "Internal error".
    *
    * <p>The modules are framework-free by design — no CDI — so their objects are constructed here
@@ -393,7 +438,11 @@ public class ControlSocket {
       CommandRegistry commandRegistry,
       DaemonProjectContext context) {
     DaemonAgentDefaults defaults =
-        new DaemonAgentDefaults(agentDefaultType, agentActivityTrackingEnabled);
+        new DaemonAgentDefaults(
+            agentDefaultType,
+            agentActivityTrackingEnabled,
+            surfaceConfigurations,
+            DaemonAgentDefaults.factsOf(projectId, repoName));
     DaemonMcpEndpoints endpoints;
     try {
       endpoints = new DaemonMcpEndpoints(url.orElse(null), projectId, repositoryMcpUrl);
@@ -409,18 +458,79 @@ public class ControlSocket {
         new AgentTranscriptTailService(transcripts, logs, transcriptTailPollMs);
     tail.start();
     this.transcriptTail = tail;
+    AgentAuthStatus authStatus = new AgentAuthStatus(processes, claudeMount, WORKSPACE_DIR.toPath());
     AgentLaunchService launch =
         new AgentLaunchService(
             new CommandsAgentCommands(commandService, commandRegistry, store),
-            new AgentAuthStatus(processes, claudeMount, WORKSPACE_DIR.toPath()),
+            authStatus,
             transcripts,
             tail,
             defaults,
-            endpoints,
+            // The scope→server mapping is this daemon's, not the library's: one server, the
+            // repository one, project- or repository-narrowed. See ProjectMcpServers.
+            new ProjectMcpServers(endpoints, repoName),
             context,
             claudeMount,
-            hooksPort);
-    projectsApi.wireAgents(launch, new AgentSessionQueryService(store, agentSessionStore), defaults);
+            hooksPort,
+            // "for this project", not the library's "for this workspace". The two daemons say
+            // different nouns on purpose and stay divergent; the library made the sentence an
+            // argument rather than picking a winner.
+            TASK_PROMPT_BOOTSTRAP);
+    projectsApi.wireAgents(
+        launch,
+        new AgentSessionQueryService(store, agentSessionStore),
+        defaults,
+        capabilities(processes, authStatus),
+        // Null when constructed directly rather than by CDI, which is how the tests here build it.
+        imageVersion == null ? "" : imageVersion.map(String::trim).orElse(""),
+        reportedBy());
+  }
+
+  /**
+   * The bootstrap turn a {@code deliverTaskPrompt} launch is seeded with. A <em>project</em>'s task
+   * prompt: this container serves one project and its composed runs are drafted against that
+   * project's plan. qits-workspace-daemon says "workspace" in the same sentence, and the difference
+   * is deliberate — the library carries the wording as a constructor argument for exactly that
+   * reason.
+   */
+  static final String TASK_PROMPT_BOOTSTRAP =
+      "Fetch the current task prompt for this project with the taskPrompt tool, then implement what"
+          + " it describes.";
+
+  /**
+   * What the harnesses in this container's image can be configured with — probed <b>once, here, at
+   * boot</b>, and served from {@code GET /agents/available} for the host to cache behind the
+   * editor's model and effort dropdowns.
+   *
+   * <p>Once and at boot because each report spawns a process or two: probing per request would put
+   * that on the path of every editor page load, and probing from the editor is impossible anyway —
+   * the binaries live in the image and the editor is a platform-wide route with no container in
+   * front of it.
+   *
+   * <p><b>A probe that fails must not stop the daemon starting.</b> The library already guarantees
+   * that per harness (a missing binary yields the shipped fallback, flagged); the catch here is for
+   * everything around it, because an empty capability array costs the editor a stale dropdown and
+   * nothing else, while an exception out of the wiring would cost the container its whole agent
+   * surface.
+   */
+  private java.util.List<HarnessCapabilities> capabilities(
+      ProcessRunner processes, AgentAuthStatus authStatus) {
+    try {
+      return new HarnessCapabilityService(
+              processes, authStatus, claudeMount, WORKSPACE_DIR.toPath())
+          .reportAll();
+    } catch (RuntimeException e) {
+      LOG.warnf("Could not report harness capabilities: %s", e.getMessage());
+      return java.util.List.of();
+    }
+  }
+
+  /**
+   * Who took the report. The same spelling qits-projects fills in when a daemon names nothing, so
+   * the catalogue keys a container's reports the same way whichever side named it.
+   */
+  private String reportedBy() {
+    return projectId == null || projectId.isBlank() ? "" : "project-agent/" + projectId;
   }
 
   /**

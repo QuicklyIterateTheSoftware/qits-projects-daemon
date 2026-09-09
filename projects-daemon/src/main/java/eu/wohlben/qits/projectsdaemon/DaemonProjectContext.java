@@ -1,6 +1,5 @@
 package eu.wohlben.qits.projectsdaemon;
 
-import eu.wohlben.qits.projectsdaemon.commands.ProjectContext;
 import java.util.function.Supplier;
 
 /**

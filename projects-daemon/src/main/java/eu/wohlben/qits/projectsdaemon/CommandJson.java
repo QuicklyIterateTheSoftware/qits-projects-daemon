@@ -1,9 +1,9 @@
 package eu.wohlben.qits.projectsdaemon;
 
-import eu.wohlben.qits.projectsdaemon.commands.ActionResolver;
-import eu.wohlben.qits.projectsdaemon.commands.AgentSessionRef;
-import eu.wohlben.qits.projectsdaemon.commands.Command;
-import eu.wohlben.qits.projectsdaemon.commands.CommandLogLine;
+import eu.wohlben.qits.commands.ActionResolver;
+import eu.wohlben.qits.commands.AgentSessionRef;
+import eu.wohlben.qits.commands.Command;
+import eu.wohlben.qits.commands.CommandLogLine;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import java.time.Instant;
@@ -60,6 +60,12 @@ final class CommandJson {
     // Absent optionals are omitted rather than emitted as explicit nulls, matching ProjectsJson:
     // Jackson maps a missing component to null when it reconstructs a record, so the caller sees the
     // same value either way.
+    // Where in the product this session was started from, for an agent command that named one.
+    // Absent for every non-agent command, for the sign-in terminal (which is nobody's surface), and
+    // for every agent command launched before the surface became a value that travels — which is
+    // why the frontend keeps reading the " (tickets desk)" suffix off actionName as a fallback for
+    // one release, and why that fallback is a dated crutch rather than the contract it used to be.
+    putIfPresent(body, "agentSurface", command.agentSurface());
     putIfPresent(body, "commitHash", command.commitHash());
     putIfPresent(body, "shortCommitHash", shortCommitHash(command.commitHash()));
     putIfPresent(body, "actionId", command.actionId());

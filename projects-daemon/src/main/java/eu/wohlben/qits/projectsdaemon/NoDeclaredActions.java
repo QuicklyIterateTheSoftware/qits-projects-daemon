@@ -1,6 +1,6 @@
 package eu.wohlben.qits.projectsdaemon;
 
-import eu.wohlben.qits.projectsdaemon.commands.ActionResolver;
+import eu.wohlben.qits.commands.ActionResolver;
 import java.util.List;
 import java.util.Optional;
 

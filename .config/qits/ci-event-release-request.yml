@@ -105,7 +105,15 @@ steps:
       # injects nothing, or a deployment that turned the mirror plane off) deactivates the settings
       # profile and Central is resolved directly.
       export QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}"
-      ./mvnw -B -ntp -s .qits-maven-settings.xml verify
+      # The platform's own registry, where the shared harness library (eu.wohlben.qits:
+      # qits-coding-agents / qits-commands) is published. NEW WITH THE HARNESS CUTOVER: this reactor
+      # carried those two modules as sources and resolved everything else from Central, so until now
+      # nothing here needed the registry at all. The settings file's exact-id mirror is what lets a
+      # http:// repository be resolved at all; it reads this variable, and unset would leave the
+      # mirror url literally unexpanded.
+      export QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL"
+      ./mvnw -B -ntp -s .qits-maven-settings.xml verify \
+        -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL"
 
   - image: qits/build-images/ci-base:latest
     build: true
@@ -151,6 +159,7 @@ steps:
       ref="$QITS_BUILD_REGISTRY/$QITS_IMAGE_REPOSITORY/projects-daemon:$QITS_CI_SHA"
       buildctl build --frontend dockerfile.v0 \
         --local context=. --local dockerfile=docker \
+        --opt build-arg:QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL" \
         --opt build-arg:QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}" \
         --secret id=qits-client-id,src=/tmp/qits-client-id \
         --secret id=qits-client-secret,src=/tmp/qits-client-secret \

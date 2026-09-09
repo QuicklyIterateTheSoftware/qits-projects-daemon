@@ -1,22 +1,19 @@
 package eu.wohlben.qits.projectsdaemon;
 
-import eu.wohlben.qits.projectsdaemon.agents.AgentDefaults;
-import eu.wohlben.qits.projectsdaemon.agents.AgentDesk;
-import eu.wohlben.qits.projectsdaemon.agents.AgentLaunchMode;
-import eu.wohlben.qits.projectsdaemon.agents.AgentLaunchRequest;
-import eu.wohlben.qits.projectsdaemon.agents.AgentLaunchService;
-import eu.wohlben.qits.projectsdaemon.agents.AgentMcpScope;
-import eu.wohlben.qits.projectsdaemon.agents.AgentSessionQueryService;
-import eu.wohlben.qits.projectsdaemon.agents.AgentType;
-import eu.wohlben.qits.projectsdaemon.commands.CheckoutUnavailableException;
-import eu.wohlben.qits.projectsdaemon.commands.CommandNotFoundException;
-import eu.wohlben.qits.projectsdaemon.commands.CommandRegistry;
-import eu.wohlben.qits.projectsdaemon.commands.CommandService;
-import eu.wohlben.qits.projectsdaemon.commands.CommandStatus;
-import eu.wohlben.qits.projectsdaemon.commands.InvalidCommandRequestException;
-import eu.wohlben.qits.projectsdaemon.commands.LogChannel;
-import eu.wohlben.qits.projectsdaemon.commands.LogSeverity;
-import eu.wohlben.qits.projectsdaemon.commands.ProjectContext;
+import eu.wohlben.qits.agents.AgentDefaults;
+import eu.wohlben.qits.agents.AgentLaunchService;
+import eu.wohlben.qits.agents.AgentNotSignedInException;
+import eu.wohlben.qits.agents.AgentSessionQueryService;
+import eu.wohlben.qits.agents.AgentType;
+import eu.wohlben.qits.agents.HarnessCapabilities;
+import eu.wohlben.qits.commands.CheckoutUnavailableException;
+import eu.wohlben.qits.commands.CommandNotFoundException;
+import eu.wohlben.qits.commands.CommandRegistry;
+import eu.wohlben.qits.commands.CommandService;
+import eu.wohlben.qits.commands.CommandStatus;
+import eu.wohlben.qits.commands.InvalidCommandRequestException;
+import eu.wohlben.qits.commands.LogChannel;
+import eu.wohlben.qits.commands.LogSeverity;
 import io.vertx.core.Context;
 import io.vertx.core.Future;
 import io.vertx.core.MultiMap;
@@ -30,6 +27,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
@@ -53,6 +51,7 @@ import org.jboss.logging.Logger;
  *   POST /commands/{id}/terminate      end it
  *   GET  /agents/available             the harnesses, and the default
  *   POST /agents                       launch a coding agent
+ *   POST /agents/sign-in               open a harness's sign-in terminal
  *   GET  /agent-sessions               the session lineage tree
  *   WS   /terminal/commands/{id}       the interactive terminal
  *   WS   /chat/commands/{id}           the chat transport
@@ -119,6 +118,18 @@ public class ProjectsApi {
   static final String AGENTS_PATH = "/agents";
 
   static final String AGENTS_AVAILABLE_PATH = "/agents/available";
+
+  /**
+   * {@code POST /agents/sign-in} — the sign-in terminal, opened deliberately.
+   *
+   * <p><b>The door had to be built, because the substitution that used to open it is gone.</b> A
+   * login terminal only ever appeared here as a swap: an unauthenticated launch quietly returned
+   * {@code launchLogin}'s bare REPL instead of the session that was asked for, and the caller
+   * redirected you to it. The library refuses that launch now (see {@link
+   * AgentNotSignedInException}), so without this route the terminal is unreachable and an estate
+   * nobody has signed in on cannot be signed in at all.
+   */
+  static final String AGENTS_SIGN_IN_PATH = "/agents/sign-in";
 
   static final String AGENT_SESSIONS_PATH = "/agent-sessions";
 
@@ -201,6 +212,19 @@ public class ProjectsApi {
   private volatile AgentSessionQueryService agentSessions;
   private volatile AgentDefaults agentDefaults;
 
+  /**
+   * What the harnesses in this container's image can be configured with, probed once at boot by
+   * {@link ControlSocket} and held. Empty for a daemon that took no report — the absent case the
+   * host reads as "nothing to record", never a failure.
+   */
+  private volatile List<HarnessCapabilities> agentCapabilities = List.of();
+
+  /** The image build this container runs, when it was told one; blank when it was not. */
+  private volatile String imageVersion = "";
+
+  /** Who took the report — this container, named for the project it serves. */
+  private volatile String reportedBy = "";
+
   /** Wire the commands surface. */
   void wireCommands(
       CommandService commands, CommandRegistry registry, ProjectContext projectContext) {
@@ -217,9 +241,30 @@ public class ProjectsApi {
       AgentLaunchService agentLaunch,
       AgentSessionQueryService agentSessions,
       AgentDefaults agentDefaults) {
+    wireAgents(agentLaunch, agentSessions, agentDefaults, List.of(), "", "");
+  }
+
+  /**
+   * Wire the coding-agent surface, with the boot-time capability report {@code GET
+   * /agents/available} answers beside the harness list.
+   *
+   * <p>The report is passed in rather than taken here for the reason it is taken at boot at all: it
+   * spawns a process per harness, and a request path that did that would put two spawns on every
+   * editor page load.
+   */
+  void wireAgents(
+      AgentLaunchService agentLaunch,
+      AgentSessionQueryService agentSessions,
+      AgentDefaults agentDefaults,
+      List<HarnessCapabilities> agentCapabilities,
+      String imageVersion,
+      String reportedBy) {
     this.agentLaunch = agentLaunch;
     this.agentSessions = agentSessions;
     this.agentDefaults = agentDefaults;
+    this.agentCapabilities = agentCapabilities == null ? List.of() : List.copyOf(agentCapabilities);
+    this.imageVersion = imageVersion == null ? "" : imageVersion;
+    this.reportedBy = reportedBy == null ? "" : reportedBy;
   }
 
   /**
@@ -409,6 +454,7 @@ public class ProjectsApi {
   private static boolean isAgentPath(String path) {
     return path.equals(AGENTS_PATH)
         || path.equals(AGENTS_AVAILABLE_PATH)
+        || path.equals(AGENTS_SIGN_IN_PATH)
         || path.equals(AGENT_SESSIONS_PATH);
   }
 
@@ -424,7 +470,13 @@ public class ProjectsApi {
     try {
       if (AGENTS_AVAILABLE_PATH.equals(path)) {
         return method == HttpMethod.GET
-            ? new Reply(200, AgentJson.available(agentDefaults.defaultAgentType()))
+            ? new Reply(
+                200,
+                AgentJson.available(
+                    agentDefaults.defaultAgentType(),
+                    imageVersion,
+                    reportedBy,
+                    agentCapabilities))
             : new Reply(405, ProjectsJson.error("Method not allowed"));
       }
       if (AGENTS_PATH.equals(path)) {
@@ -432,7 +484,17 @@ public class ProjectsApi {
             ? new Reply(
                 200,
                 AgentJson.launched(
-                    agentLaunch.launch(launchRequest(body)),
+                    agentLaunch.launch(AgentJson.launchRequest(jsonBody(body))),
+                    projectContext.projectId(),
+                    projectContext.repoName()))
+            : new Reply(405, ProjectsJson.error("Method not allowed"));
+      }
+      if (AGENTS_SIGN_IN_PATH.equals(path)) {
+        return method == HttpMethod.POST
+            ? new Reply(
+                200,
+                AgentJson.launched(
+                    agentLaunch.launchLogin(signInHarness(body)),
                     projectContext.projectId(),
                     projectContext.repoName()))
             : new Reply(405, ProjectsJson.error("Method not allowed"));
@@ -445,6 +507,17 @@ public class ProjectsApi {
       return new Reply(404, ProjectsJson.error("No such endpoint"));
     } catch (CommandNotFoundException e) {
       return new Reply(404, ProjectsJson.error(e.getMessage()));
+    } catch (AgentNotSignedInException e) {
+      // 409, and NOT the 500 this would otherwise fall through to. A signed-out platform is not a
+      // broken one, and "Internal error" — which is what the ladder below deliberately answers,
+      // message withheld — is indistinguishable from a daemon fault to the browser.
+      //
+      // The `error` discriminator is the point of the body. A caller matching this case on the
+      // MESSAGE would be the display-string-as-contract mistake this epic exists to delete (the
+      // frontend's " (tickets desk)" match), and it would freeze a sentence written for a human.
+      // The key is machine-readable, the harness is named rather than parsed out of prose, and the
+      // sentence stays free to be reworded.
+      return new Reply(409, AgentJson.notSignedIn(e));
     } catch (InvalidCommandRequestException e) {
       return new Reply(400, ProjectsJson.error(e.getMessage()));
     } catch (CheckoutUnavailableException e) {
@@ -453,6 +526,21 @@ public class ProjectsApi {
       LOG.errorf(e, "projects-daemon agents API failed handling %s", path);
       return new Reply(500, ProjectsJson.error("Internal error"));
     }
+  }
+
+  /**
+   * Which harness's sign-in terminal to open: what the body named, else the resolved default. A
+   * deliberate door, so the caller states what it wants and gets exactly that.
+   */
+  private AgentType signInHarness(String body) {
+    JsonObject json = jsonBody(body);
+    String requested = json.getString("agentType");
+    if (requested == null || requested.isBlank()) {
+      return agentDefaults.defaultAgentType();
+    }
+    return AgentType.parse(requested)
+        .orElseThrow(
+            () -> new InvalidCommandRequestException("Invalid agentType: " + requested));
   }
 
   /**
@@ -525,20 +613,6 @@ public class ProjectsApi {
       return new Reply(400, ProjectsJson.error("actionId is required"));
     }
     return new Reply(200, CommandJson.launched(commands.launch(actionId), projectId, repoName));
-  }
-
-  /** {@code POST /agents} — the launch request, with the enums validated like a query parameter. */
-  private static AgentLaunchRequest launchRequest(String body) {
-    JsonObject json = jsonBody(body);
-    return new AgentLaunchRequest(
-        parseEnum(json.getString("scope"), AgentMcpScope::valueOf, "scope"),
-        parseEnum(json.getString("desk"), AgentDesk::valueOf, "desk"),
-        parseEnum(json.getString("mode"), AgentLaunchMode::valueOf, "mode"),
-        json.getString("initialContext"),
-        json.getString("resumeSessionId"),
-        Boolean.TRUE.equals(json.getBoolean("fork")),
-        Boolean.TRUE.equals(json.getBoolean("deliverTaskPrompt")),
-        parseEnum(json.getString("agentType"), AgentType::valueOf, "agentType"));
   }
 
   private static JsonObject jsonBody(String body) {

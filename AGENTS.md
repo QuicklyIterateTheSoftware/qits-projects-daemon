@@ -10,21 +10,51 @@ repository. Read it before adding anything back.
 ## Modules
 
     projects-daemon-protocol/   the wire contract: records, the codec, the constants. No dependencies.
-    qits-commands/              processes: the PTY, the registry, the store, the chat seams.
-    qits-coding-agents/         the harnesses: Claude Code, Kimi, session lineage, transcripts.
     projects-daemon/            the Quarkus module: sockets, provisioning, the loopback API.
 
-`qits-commands` and `qits-coding-agents` are framework-free — no CDI, no JAX-RS, no Jackson — so
-they cannot read configuration. `ControlSocket` is the single reader and hands every setting down
-as a constructor argument. That is not tidiness: two readers of the hook port is how `HookWebhook`
-and `AgentLaunchService` end up bound to different ports, which fails invisibly (the agent runs and
+## The harness is a dependency, not a module
+
+`qits-commands` and `qits-coding-agents` used to sit here as two more modules — a copy of
+qits-workspace-daemon's, under `eu.wohlben.qits.projectsdaemon.*` package roots. The two copies
+drifted (this side grew the tickets desk, that side grew plugins and prompt refinement) because
+every harness change had to be written twice, and the second write is what kept not happening. The
+**union** of both moved to <https://github.com/QuicklyIterateTheSoftware/qits-coding-agents> and
+both daemons depend on the released artifact:
+
+    eu.wohlben.qits:qits-commands        the PTY, the registry, the store, the chat transports
+    eu.wohlben.qits:qits-coding-agents   the harnesses, launch rendering, ACP, transcripts, plugins
+
+**What that costs, and it is deliberate.** The coordinate is a released CalVer, so a daemon runs
+the library version it was built against and there is no way to change shared harness behaviour and
+this daemon in one commit. Harness work is therefore a two-step: prove it in the library's own
+suite, release it, then bump `qits-coding-agents.version` in the root pom here and release this.
+The library's suite is where harness behaviour is proven now — this repository cannot prove it.
+
+**What stayed here is what is genuinely this product's**, and it is exactly the set of seams the
+library declares:
+
+    ProjectContext          extends the library's CheckoutContext with projectId/repoName
+    ProjectMcpServers       the scope→server mapping: ONE server, `repository`, narrowed here
+    DaemonAgentDefaults     the harness default, activity tracking, the mounted document, the facts
+    DaemonMcpEndpoints      where that server lives
+    AgentConfigurationBoot  materializing the per-surface configuration document at boot
+
+Both library modules are framework-free — no CDI, no JAX-RS, no Jackson — so they cannot read
+configuration. `ControlSocket` is the single reader and hands every setting down as a constructor
+argument. That is not tidiness: two readers of the hook port is how `HookWebhook` and
+`AgentLaunchService` end up bound to different ports, which fails invisibly (the agent runs and
 simply never reports lineage).
 
 ## The clone-alone rule
 
 `./mvnw verify` must be green from a clone of this repository alone: no monorepo, no sibling
-checkouts, no docker, no network beyond Maven Central. Nothing here may depend on a `-SNAPSHOT`
-this repository does not build.
+checkouts, no docker. Nothing here may depend on a `-SNAPSHOT` this repository does not build.
+
+The rule gained one word with the harness cutover: **no network beyond Maven Central and the
+platform's own Maven registry**, where `eu.wohlben.qits:qits-coding-agents` is published. That is
+why the root pom now declares a `qits-maven` repository and why both CI recipes and
+`docker/Dockerfile` pass `QITS_MAVEN_REPOSITORY_URL` — the id has to stay `qits-maven` or the
+settings file's exact-id mirror stops outranking Maven's http-repository blocker.
 
 Tests that need a PTY are `@EnabledOnOs(LINUX)` — `ForeignPty` calls libc through
 `java.lang.foreign`, and the descriptors are Linux ABI. Keep that annotation on anything that
@@ -140,16 +170,19 @@ went and the seams that consumed it were answered differently:
 - `DaemonAgentDefaults` lost its middle resolution step. Order is now *request > daemon config*,
   where the workspace daemon had *request > `.qits-config.yml` > daemon config*.
 
-**Agent surface.**
+**Agent surface.** These were *deleted* while the harness was a copy in this repository. Since the
+cutover the code exists — the library is the union of both daemons' copies — and what is trimmed is
+that nothing here **wires** it. The distinction matters: unwiring is a line, un-deleting was a port.
 
-- `PromptRefinementService` and `POST /prompt-refinements`. With it, `AgentDefaults.refinementModel()`
-  and `qits.refinement.model`.
-- `AgentPluginService`, `InstalledPluginDto` and `/agent-plugins`.
-- `AgentMcpScope.ACTIONS`. The `actions` MCP server has no address (no service serves it) and the
-  `observability` one is a different service; a project agent addresses qits-projects and nothing
-  else, so a scope naming an unreachable server would only fail at launch. Scopes are `PROJECT` and
-  `REPOSITORY`.
-- `READ_ONLY_ACTION_TOOLS` and `READ_ONLY_OBSERVABILITY_TOOLS` allowlists, with their servers.
+- `PromptRefinementService` and `POST /prompt-refinements`: no route. `refinementModel()` answers
+  empty, and `qits.refinement.model` is not read.
+- `AgentPluginService`, `InstalledPluginDto` and `/agent-plugins`: no route.
+- `AgentMcpScope.ACTIONS` is in the library's enum (the union of two enums) and **refused** by
+  `ProjectMcpServers`: the `actions` server has no address on the project's segment and the
+  `observability` one is a different service, so a scope naming an unreachable server would only
+  fail at launch. This host serves `PROJECT` and `REPOSITORY`.
+- The action and observability pre-approval lists travel with each host's own mapping, so this one
+  carries `READ_ONLY_REPOSITORY_TOOLS` and nothing else.
 
 **A launch attaches exactly one MCP server**, `repository`, and it is the one carrying the epic and
 ticket tools — the whole reason this container exists. Excluding the workspace world is deliberate: a
@@ -157,7 +190,10 @@ project agent's job is the project's plan and the work beside it, not workspace 
 service's telemetry. Nothing can put the others back at runtime either. Claude is launched with
 `--strict-mcp-config`, so the rendered `--mcp-config` is the complete set and the shared
 `/claude-home` volume's own MCP entries are ignored; Kimi gets a launch-local `mcp.json` in a
-throwaway `KIMI_CODE_HOME`. Both are asserted in `AgentLaunchServiceTest`.
+throwaway `KIMI_CODE_HOME`. Both are asserted in the **library's** suite, against this daemon's
+mapping reproduced there as the `ProjectHostMcpServers` fixture — the rendered command lines stay
+byte-for-byte asserted where the harness now lives, because a daemon can no longer prove harness
+behaviour in the same commit as a harness change.
 
 **Other.**
 
@@ -170,41 +206,127 @@ throwaway `KIMI_CODE_HOME`. Both are asserted in `AgentLaunchServiceTest`.
 
 ## The two axes of a launch
 
-A launch is steered and addressed separately, and the two are different enums on
-`AgentLaunchRequest`. Folding them together would mean a desk could not be narrowed to a repository,
-or that narrowing to a repository quietly changed what the agent was for.
+A launch is steered and addressed separately, and the two are different values on
+`AgentLaunchRequest`. Folding them together would mean a surface could not be narrowed to a
+repository, or that narrowing to a repository quietly changed what the agent was for.
 
-    scope   AgentMcpScope   PROJECT | REPOSITORY   how narrow the one MCP URL is
-    desk    AgentDesk       EPICS | TICKETS        what the session is for
+    scope     AgentMcpScope   PROJECT | REPOSITORY               how narrow the one MCP url is
+    surface   AgentSurface    project.epics | project.tickets    where in the product it started
 
-`EPICS` is the default and **renders the pre-desk launch byte for byte** — no system prompt, and the
-scope-derived command names (`… (repository MCP)` / `… (project MCP)`) it always had. That
-equivalence is the ground the axis was added on and it is asserted, not assumed.
+**The surface replaced the desk.** `AgentDesk` was a two-valued enum with its prompt inlined,
+because there was nowhere to put a prompt; the library's `AgentSurface` is an open vocabulary of
+eight keys, `EPICS` is `project.epics` and `TICKETS` is `project.tickets`, and both render byte for
+byte what the enum rendered. This container serves **two** of the eight.
 
-`TICKETS` opens the intake-and-triage desk on the same container and the same server: the ticket
-tools were always there, so a desk is a steering choice rather than a second wiring. It carries a
-system-prompt appendix and it names its command **`<harness> (tickets desk)`**. That substring is a
-**contract with the frontend**, which segregates a project's sessions into the two desks by matching
-it — a `Command` has no desk field, because the registry records what was launched, not why.
-Changing the suffix moves every ticket session into the epics list without failing anything.
+- **On the way in**, `AgentJson.launchRequest` reads `surface` off the `POST /agents` body. A
+  *missing* one resolves to what the request's shape implies (a `PROJECT`-scoped launch is the epics
+  desk) for one release, so this daemon could ship before the frontend; an *unknown* one is a 400.
+  **`desk` is still accepted and is now a wire-level mapping and nothing else** — the enum is gone
+  from the library, and `EPICS`/`TICKETS` are translated at the door so a frontend that has not
+  shipped keeps working. An explicit `surface` wins over it. Task 56a914b7 removes the field.
+- **On the way out**, `CommandJson` emits `agentSurface` on every command body. That is what lets
+  the frontend stop matching `" (tickets desk)"` in `actionName` to tell a tickets session from an
+  epics one. The command *name* keeps its current text so nothing running gets renamed while the
+  two sides ship — but the string match is a **dated migration crutch now, not the contract it used
+  to be**.
 
-**The system-prompt seam.** `CodingAgent.appendSystemPrompt` is the steering channel;
-`AgentLaunchService.systemPromptFor` maps a desk onto it and answers `null` for `EPICS`. Claude
-renders it as `--append-system-prompt` — appended, never replacing the harness's own prompt, which is
-what makes the tools and the checkout usable in the first place. **Kimi has no counterpart** on
-either channel (no CLI flag, no ACP `session/new` field) and overrides the setter to an explicit,
-documented no-op: a Kimi desk is steered by its tools and its name alone. Leaving the field silently
-unstored would make a Kimi tickets desk read as configured while behaving like the default one.
+**What a surface is configured with lives in a document**, not in this repository: harness, model,
+effort, remote control, permission mode, activity tracking, system prompt, initial prompt, and which
+MCP servers attach. See below.
 
-The prompt is a text block on `AgentLaunchService`, beside `TASK_PROMPT_BOOTSTRAP`, not a classpath
-resource — this module is framework-free and has no resources directory. A prompt is embedded as a
-shell-quoted argument (see `ClaudeCodeAgent`), so a literal needs no side file and a test can assert
-it byte for byte.
+## The document a container is born with
 
-The **pre-approved reads** follow the desks: `list_tickets` and `get_ticket` join `list_epics` and
-`get_epic` on `READ_ONLY_REPOSITORY_TOOLS`, because a desk has to survey before it can tell an intake
-from a duplicate, and `get_ticket` brings the comment thread with it. Every write on either surface
-stays off the list and still prompts.
+qits-projects resolves every surface this container serves into one JSON document and injects it at
+container creation. `AgentConfigurationBoot` materializes it at boot, before anything is started, and
+hands the library the path; `DaemonAgentDefaults.surfaceConfigurations()` is where the launch path
+reads it.
+
+    QITS_PROJECTS_DAEMON_AGENT_CONFIGURATION        the document bytes
+    QITS_PROJECTS_DAEMON_AGENT_CONFIGURATION_PATH   /tmp/qits/agent-configuration.json
+
+**Two environment variables rather than the mounted file the epic asked for**, because a host bind
+mount is not expressible on this estate's container wire: qits-containers' `ContainerSpec` carries
+`volumeMounts` and `sharedMounts` and no host path at all, deliberately — the shape is the security
+boundary — and neither host that creates an agent container holds a docker socket to write one with.
+Every decision the epic made survives that; only the transport moved. qits-workspaces-service settled
+the same shape first (`QITS_WORKSPACE_DAEMON_AGENT_CONFIGURATION`, commit `38534c4`); each daemon
+reads its own prefix and hands the library a path, so the shared *shape* is the contract rather than
+a shared spelling.
+
+**Both or neither.** Absent is quiet and permanent — a container created before this shipped runs on
+the constants the library still ships. One without the other, or a document that will not parse,
+fails the boot naming the cause: half a contract must not read as "this container was given no
+configuration", because that state is indistinguishable from a working one until somebody notices an
+agent behaving as it did three releases ago.
+
+**A container keeps what it was born with.** An edit in the store applies to the next container;
+nothing here polls, and there is no staleness flag anywhere.
+
+## The seams this daemon fills
+
+`ProjectMcpServers` is the one worth reading. It answers **both** halves of the library's
+`AgentMcpServers`:
+
+- `serversFor(scope)` — the scope→server mapping: one server, `repository`, at project scope or
+  narrowed to the one repository checked out. `ACTIONS` is refused rather than served the repository
+  server, because no actions server exists on the project's segment.
+- `serverFor(key, scope, narrowing)` — one server narrowed exactly as a surface's configuration
+  asks, in the canonical `projectId`, `repositoryId`, `workspaceId` order, with every id through
+  `AgentMcpIds.requireId`. A `workspace` narrowing is **refused**: there is no workspace here, and
+  answering for the whole project instead would be a session quietly wider than it was configured to
+  be. `honoursNarrowing()` is therefore true, so no launch records that its addressing was the
+  host's rather than the document's.
+
+`DaemonAgentDefaults` answers `refinementModel()` empty (nothing here refines a prompt — that is the
+workspace daemon's flow) and `ambientFacts()` with `project` and `repository`. `epic`, `workspace`
+and `ticket` are a workspace container's facts and stay unresolved, so an initial-prompt template
+naming one renders it literally rather than as `null`.
+
+`ControlSocket` passes the library its own task-prompt bootstrap sentence — "for this **project**",
+where qits-workspace-daemon says "workspace". The two diverge on purpose; the library made the
+sentence a constructor argument rather than picking a winner.
+
+## What the harnesses in this image can be configured with
+
+`GET /agents/available` answers `agents` and `defaultAgent` as it always did, plus `imageVersion`,
+`reportedBy` and `capabilities[]` — one `HarnessCapabilities` report per harness, produced by
+running the binaries **once, at boot** (`ControlSocket.capabilities`). qits-projects caches it per
+(harness, image version) behind the editor's model and effort dropdowns.
+
+Once and at boot because each report spawns a process: probing per request would put that on the
+path of every editor page load, and probing host-side is impossible — the binaries live in the image
+and the editor is a platform-wide route with no container in front of it. A probe that fails yields
+the library's shipped fallback, flagged `probeFailed`, and never stops the daemon starting.
+
+`imageVersion` is **blank unless a deployment injects `QITS_PROJECTS_DAEMON_IMAGE_VERSION`**, and
+that is not a gap: nothing tells a container its own image tag (the daemon's `build.version` is this
+repository's release, a different thing from the `qits/project-agent` calver the container was
+created from), and the host that chose that pin fills the blank from it. A daemon that names one
+wins. `reportedBy` is `project-agent/<projectId>` — the same spelling the host would have filled in,
+so the catalogue keys a container's reports the same way whichever side named them.
+
+## Signing in is a door, and being signed out is a 409
+
+`POST /agents/sign-in` (optional `{"agentType"}`) opens a harness's sign-in terminal and answers the
+ordinary `{command: …}` envelope. **The route is new because the thing that used to open that
+terminal was a substitution**: an unauthenticated launch quietly returned a bare REPL instead of the
+session you asked for, and the caller redirected you to it. The library refuses that launch now
+(`AgentNotSignedInException`), so without this door the terminal would be unreachable and a
+signed-out estate could not be signed in at all.
+
+Every route that can raise the refusal answers **409** with
+
+    {"error": "not-signed-in", "agentType": "CLAUDE", "message": "<the library's sentence>"}
+
+and not the 500 the dispatch ladder would otherwise give it — a signed-out platform is not a broken
+one, and "Internal error" (message deliberately withheld) is indistinguishable from a daemon fault.
+**`error` is a required discriminator and is the point**: a caller matching this case on the message
+text would be the display-string-as-contract mistake this epic exists to delete, and it would freeze
+a sentence written for a human. `agentType` is there so the caller can name the harness — and open
+the right terminal — without parsing prose.
+
+The unattended paths keep failing loudly rather than opening a terminal nobody is watching: a
+dispatch that "started an agent" which is actually a sign-in prompt is a green-while-dead shape.
 
 ## Derivations, and which ones are honest
 

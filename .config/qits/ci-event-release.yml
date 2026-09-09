@@ -235,6 +235,7 @@ steps:
       repository="$QITS_BUILD_REGISTRY/$QITS_IMAGE_REPOSITORY/projects-daemon"
       buildctl build --frontend dockerfile.v0 \
         --local context=. --local dockerfile=docker \
+        --opt build-arg:QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL" \
         --opt build-arg:QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}" \
         --secret id=qits-client-id,src=/tmp/qits-client-id \
         --secret id=qits-client-secret,src=/tmp/qits-client-secret \
@@ -302,6 +303,7 @@ steps:
       buildctl build --frontend dockerfile.v0 \
         --local context=. --local dockerfile=docker \
         --opt target=sbom \
+        --opt build-arg:QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL" \
         --opt build-arg:QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}" \
         --secret id=qits-client-id,src=/tmp/qits-client-id \
         --secret id=qits-client-secret,src=/tmp/qits-client-secret \
