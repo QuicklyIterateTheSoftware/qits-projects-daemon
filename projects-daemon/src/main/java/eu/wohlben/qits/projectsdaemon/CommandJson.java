@@ -8,6 +8,7 @@ import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import java.time.Instant;
 import java.util.List;
+import org.jboss.logging.Logger;
 
 /**
  * Serializes {@code qits-commands}' result records to the JSON {@link ProjectsApi} answers with.
@@ -36,6 +37,8 @@ import java.util.List;
  * null.
  */
 final class CommandJson {
+
+  private static final Logger LOG = Logger.getLogger(CommandJson.class);
 
   private CommandJson() {}
 
@@ -68,6 +71,7 @@ final class CommandJson {
     // grouping rather than keep a display-string contract alive forever. actionName is a label
     // again, and nothing parses it.
     putIfPresent(body, "agentSurface", command.agentSurface());
+    putLaunchRecord(body, command);
     putIfPresent(body, "commitHash", command.commitHash());
     putIfPresent(body, "shortCommitHash", shortCommitHash(command.commitHash()));
     putIfPresent(body, "actionId", command.actionId());
@@ -139,6 +143,49 @@ final class CommandJson {
               .put("interactive", action.interactive()));
     }
     return new JsonObject().put("actions", entries);
+  }
+
+  /**
+   * {@code agentLaunchRecord} — <b>what the session was actually launched with</b>: its surface,
+   * harness, model, effort, permission mode, remote control, activity tracking, the platform MCP
+   * servers it attached and the catalog entries it attached by key.
+   *
+   * <p>Without this key the record is written at launch and can never be read: it is stored on the
+   * command inside the container, and {@code GET /commands} is the only door out. The epic's own
+   * per-surface verification is "start a session at each surface and confirm it ran with what the
+   * editor shows, reading the launch record rather than the logs" — which is this field, and
+   * nothing else.
+   *
+   * <p>It is served as a nested <b>object</b> rather than the string the command stores, because
+   * the string is the library's storage form and a caller that had to parse a JSON document out of
+   * a JSON string would be paying for that choice. {@code AgentLaunchRecord.toJson} is the only
+   * writer
+   * on this path, so the parse cannot fail in practice; it is guarded anyway, because a single
+   * unreadable row must not take the whole Commands list down with it, and the WARN is what stops
+   * that being silent.
+   *
+   * <p><b>No credential can appear here.</b> The record names attached external servers by key —
+   * never a url, a header name or a header value — and this method reshapes nothing, so what is
+   * served is what {@code AgentLaunchRecord} built. The rendered command line is a different field
+   * and is stored already redacted ({@code AgentLaunchMetadata.redact}); do not add anything here
+   * that would reintroduce a value either of those two deliberately keeps out.
+   */
+  private static void putLaunchRecord(JsonObject body, Command command) {
+    String record = command.agentLaunchRecord();
+    if (record == null || record.isBlank()) {
+      // Absent, not null: a non-agent command has no record, and neither has an agent command
+      // launched before a launch recorded itself. A reader can tell either of those from a session
+      // that ran with an empty configuration, which is an object with empty values in it.
+      return;
+    }
+    try {
+      body.put("agentLaunchRecord", new JsonObject(record));
+    } catch (RuntimeException notJson) {
+      LOG.warnf(
+          "Command %s carries a launch record that is not a JSON object; omitting it from the"
+              + " answer rather than failing the read",
+          command.id());
+    }
   }
 
   /** Derived rather than stored, so the DTO component is never null. */

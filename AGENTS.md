@@ -218,17 +218,24 @@ because there was nowhere to put a prompt; the library's `AgentSurface` is an op
 eight keys, `EPICS` is `project.epics` and `TICKETS` is `project.tickets`, and both render byte for
 byte what the enum rendered. This container serves **two** of the eight.
 
-- **On the way in**, `AgentJson.launchRequest` reads `surface` off the `POST /agents` body. A
-  *missing* one resolves to what the request's shape implies (a `PROJECT`-scoped launch is the epics
-  desk) for one release, so this daemon could ship before the frontend; an *unknown* one is a 400.
-  **`desk` is still accepted and is now a wire-level mapping and nothing else** — the enum is gone
-  from the library, and `EPICS`/`TICKETS` are translated at the door so a frontend that has not
-  shipped keeps working. An explicit `surface` wins over it. Task 56a914b7 removes the field.
-- **On the way out**, `CommandJson` emits `agentSurface` on every command body. That is what lets
+- **On the way in**, `AgentJson.launchRequest` reads `surface` off the `POST /agents` body, and it
+  is **required**: an *unknown* one is a 400 at the door (`AgentSurface.of`) and a *missing* one is
+  a 400 from the launch (`AgentLaunchRequest.requiredSurface`), so the answer says which of the two
+  went wrong. Both crutches are gone — the shape-implied guess with the library pin carrying task
+  747a0225, and `desk` with task 56a914b7. A caller still sending `desk` is ignored rather than
+  served, which is the answer it should get.
+- **On the way out**, `CommandJson` emits `agentSurface` on every command body. That is what let
   the frontend stop matching `" (tickets desk)"` in `actionName` to tell a tickets session from an
-  epics one. The command *name* keeps its current text so nothing running gets renamed while the
-  two sides ship — but the string match is a **dated migration crutch now, not the contract it used
-  to be**.
+  epics one; that match is deleted, so `actionName` is a label again and nothing parses it.
+- **Beside it, `agentLaunchRecord`** — what the session *actually ran with*: surface, harness,
+  model, effort, permission mode, remote control, activity tracking, the platform MCP servers it
+  attached and the catalog entries it attached **by key**. A container keeps the document it was
+  born with and an edit applies to the next one, so the store cannot answer what a past session ran
+  with — only this can, and it is the evidence the epic's per-surface verification reads instead of
+  logs. Absent, not null, for a non-agent command, the sign-in terminal, and any session launched
+  before the record existed. **No credential can travel in it**: external servers are named by key,
+  never by url or header value, and the rendered command line is stored already redacted
+  (`AgentLaunchMetadata.redact`). Nothing may be added to that object which reintroduces either.
 
 **What a surface is configured with lives in a document**, not in this repository: harness, model,
 effort, remote control, permission mode, activity tracking, system prompt, initial prompt, and which
