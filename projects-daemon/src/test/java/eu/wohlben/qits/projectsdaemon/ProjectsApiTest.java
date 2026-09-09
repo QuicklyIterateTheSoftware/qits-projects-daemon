@@ -3,12 +3,11 @@ package eu.wohlben.qits.projectsdaemon;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.projectsdaemon.commands.CommandLifecycleService;
-import eu.wohlben.qits.projectsdaemon.commands.CommandLogService;
-import eu.wohlben.qits.projectsdaemon.commands.CommandRegistry;
-import eu.wohlben.qits.projectsdaemon.commands.CommandService;
-import eu.wohlben.qits.projectsdaemon.commands.CommandStore;
-import eu.wohlben.qits.projectsdaemon.commands.ProjectContext;
+import eu.wohlben.qits.commands.CommandLifecycleService;
+import eu.wohlben.qits.commands.CommandLogService;
+import eu.wohlben.qits.commands.CommandRegistry;
+import eu.wohlben.qits.commands.CommandService;
+import eu.wohlben.qits.commands.CommandStore;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;

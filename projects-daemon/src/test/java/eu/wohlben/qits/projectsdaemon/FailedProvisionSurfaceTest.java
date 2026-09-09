@@ -4,13 +4,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import eu.wohlben.qits.projectsdaemon.commands.ActionResolver;
-import eu.wohlben.qits.projectsdaemon.commands.CommandLifecycleService;
-import eu.wohlben.qits.projectsdaemon.commands.CommandLogService;
-import eu.wohlben.qits.projectsdaemon.commands.CommandRegistry;
-import eu.wohlben.qits.projectsdaemon.commands.CommandService;
-import eu.wohlben.qits.projectsdaemon.commands.CommandStore;
-import eu.wohlben.qits.projectsdaemon.commands.ProjectContext;
+import eu.wohlben.qits.commands.ActionResolver;
+import eu.wohlben.qits.commands.CommandLifecycleService;
+import eu.wohlben.qits.commands.CommandLogService;
+import eu.wohlben.qits.commands.CommandRegistry;
+import eu.wohlben.qits.commands.CommandService;
+import eu.wohlben.qits.commands.CommandStore;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
@@ -87,6 +86,40 @@ class FailedProvisionSurfaceTest {
     assertTrue(actions.body().getJsonArray("actions").isEmpty());
     assertEquals(200, agents.status(), "the harness list needs no checkout");
     assertNotNull(agents.body().getString("defaultAgent"), "and it names one");
+    assertNotNull(
+        agents.body().getJsonArray("capabilities"),
+        "the boot-time capability report is answered here, and a probe that found no binary"
+            + " answers the shipped fallback rather than stopping the daemon");
+    assertEquals(
+        2,
+        agents.body().getJsonArray("capabilities").size(),
+        "one report per harness, taken once at boot and held");
+    assertEquals("project-agent/" + PROJECT_ID, agents.body().getString("reportedBy"));
+    assertNotNull(
+        agents.body().getString("imageVersion"),
+        "emitted even when blank — the host fills a blank from the pin it created this container"
+            + " with, and a daemon that names one wins");
+  }
+
+  /**
+   * The sign-in terminal is a door now, not a fallback.
+   *
+   * <p>It only ever appeared as a substitution: an unauthenticated launch quietly returned a bare
+   * REPL instead of the session that was asked for. The library refuses that launch now, so this
+   * route is the only way to complete the OAuth a credential volume needs once — and a 404 here
+   * would leave a signed-out estate with no way in at all.
+   *
+   * <p>Asserted by its method mapping rather than by opening one: launching it spawns the harness
+   * binary in the checkout, and neither is a fact about this daemon's routing.
+   */
+  @Test
+  void theSignInTerminalHasADoor() {
+    wireAsIfTheProvisionFailed();
+
+    assertEquals(
+        405,
+        get("/agents/sign-in").status(),
+        "routed, and POST-only — a 404 would mean the terminal is unreachable");
   }
 
   @Test
@@ -138,6 +171,7 @@ class FailedProvisionSurfaceTest {
     daemon.agentActivityTrackingEnabled = false;
     daemon.transcriptTailPollMs = 500;
     daemon.claudeMount = tempDir.toString();
+    daemon.imageVersion = Optional.empty();
     daemon.termGraceMs = 2_000;
 
     // No provision ran, so `provisioned` stays false — the state a ProvisionFailed leaves behind.

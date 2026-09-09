@@ -42,15 +42,19 @@
                  Framework-free, so it adds nothing the native-image builder has to be told about
                  — except its own FFM downcalls, which register themselves from constant
                  descriptors (see ForeignPty). -->
-            <groupId>eu.wohlben</groupId>
+            <groupId>eu.wohlben.qits</groupId>
             <artifactId>qits-commands</artifactId>
         </dependency>
         <dependency>
             <!-- The Claude Code and Kimi harnesses: launch rendering, the ACP chat transport,
                  transcript import off the shared credential volume, and the agent surface served
                  over ProjectsApi. Depends on qits-commands (a launch becomes a command), never the
-                 other way round. -->
-            <groupId>eu.wohlben</groupId>
+                 other way round.
+
+                 A RELEASED coordinate: this daemon supplies the seams the library declares
+                 (ProjectContext, ProjectMcpServers, DaemonAgentDefaults) and renders nothing
+                 itself. -->
+            <groupId>eu.wohlben.qits</groupId>
             <artifactId>qits-coding-agents</artifactId>
         </dependency>
         <dependency>

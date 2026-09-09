@@ -1,7 +1,7 @@
 package eu.wohlben.qits.projectsdaemon;
 
-import eu.wohlben.qits.projectsdaemon.commands.CommandOutputSink;
-import eu.wohlben.qits.projectsdaemon.commands.CommandRegistry;
+import eu.wohlben.qits.commands.CommandOutputSink;
+import eu.wohlben.qits.commands.CommandRegistry;
 import io.vertx.core.http.ServerWebSocket;
 import io.vertx.core.http.ServerWebSocketHandshake;
 import io.vertx.core.json.JsonObject;

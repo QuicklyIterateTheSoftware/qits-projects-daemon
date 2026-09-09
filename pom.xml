@@ -6,21 +6,23 @@
 
     <!-- Standalone parent for qits-projects-daemon, the per-project agent container. Trimmed to
          only what the modules need — the quarkus-bom import, the version-management entries for
-         the four reactor modules, and the quarkus/compiler/surefire plugin pins. The monorepo's
+         the reactor's own module and the released harness library, and the
+         quarkus/compiler/surefire plugin pins. The monorepo's
          app-wide machinery (spotless, enforcer, jandex, test chunking) is deliberately absent: the
          clone-alone rule is that `./mvnw verify` is green from this repo with nothing else on
-         disk. -->
+         disk — which since the harness cutover means Maven Central plus the platform's own Maven
+         registry, where eu.wohlben.qits:qits-coding-agents is published. -->
     <groupId>eu.wohlben</groupId>
     <artifactId>qits</artifactId>
     <version>2026.908.185932</version>
     <packaging>pom</packaging>
 
     <modules>
-        <!-- Dependency order: projects-daemon depends on all of them; qits-coding-agents depends
-             on qits-commands. -->
+        <!-- Two modules now: the wire contract and the daemon. `qits-commands` and
+             `qits-coding-agents` used to sit here as sources and are gone — they live in
+             https://github.com/QuicklyIterateTheSoftware/qits-coding-agents and arrive as released
+             jars (see the dependencyManagement block below). -->
         <module>projects-daemon-protocol</module>
-        <module>qits-commands</module>
-        <module>qits-coding-agents</module>
         <module>projects-daemon</module>
     </modules>
 
@@ -35,6 +37,17 @@
 
         <compiler-plugin.version>3.15.0</compiler-plugin.version>
         <surefire-plugin.version>3.5.4</surefire-plugin.version>
+
+        <!-- The shared harness library, released from qits-coding-agents. A CalVer coordinate, not
+             a range: a daemon runs the library version it was built against, so changing harness
+             behaviour is a two-step — release the library, then bump this line and release this
+             daemon. That is the cost of the two copies becoming one, and it is deliberate. -->
+        <qits-coding-agents.version>2026.909.111643</qits-coding-agents.version>
+
+        <!-- Where the platform publishes it. Overridden by CI (-Dqits.maven.repository.url) and by
+             the image build's QITS_MAVEN_REPOSITORY_URL build-arg; the default is the address a
+             developer's machine resolves. -->
+        <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
     </properties>
 
     <dependencyManagement>
@@ -54,22 +67,36 @@
                 <artifactId>projects-daemon-protocol</artifactId>
                 <version>${project.version}</version>
             </dependency>
-            <!-- The command and coding-agent capability jars. Named without a daemon prefix
-                 because they are the two surfaces most likely to be re-extracted into repos of
-                 their own; keeping the daemon's name out of their coordinates means that move
-                 would not rename them. -->
+            <!-- The command and coding-agent capability jars — RELEASED ARTIFACTS NOW, not
+                 modules of this reactor. They were built here from sources that were a copy of
+                 qits-workspace-daemon's, under `eu.wohlben.qits.projectsdaemon.*` package roots;
+                 the union of the two copies moved to its own repository and both daemons depend
+                 on it. The groupId gained a `.qits` segment with the move, so a stale local
+                 install of the old coordinate cannot be picked up by accident. -->
             <dependency>
-                <groupId>eu.wohlben</groupId>
+                <groupId>eu.wohlben.qits</groupId>
                 <artifactId>qits-commands</artifactId>
-                <version>${project.version}</version>
+                <version>${qits-coding-agents.version}</version>
             </dependency>
             <dependency>
-                <groupId>eu.wohlben</groupId>
+                <groupId>eu.wohlben.qits</groupId>
                 <artifactId>qits-coding-agents</artifactId>
-                <version>${project.version}</version>
+                <version>${qits-coding-agents.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
+
+    <!-- The platform's own Maven repository, where the harness library is published. New with the
+         cutover: this reactor resolved everything from Central until it stopped carrying the
+         harness as sources. The id has to stay `qits-maven` — it is what the settings file's
+         exact-id mirror matches (Maven blocks external http:// repositories otherwise) and what a
+         locally cached copy is recorded under. -->
+    <repositories>
+        <repository>
+            <id>qits-maven</id>
+            <url>${qits.maven.repository.url}</url>
+        </repository>
+    </repositories>
 
     <build>
         <pluginManagement>

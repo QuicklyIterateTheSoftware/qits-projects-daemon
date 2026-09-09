@@ -3,7 +3,7 @@ package eu.wohlben.qits.projectsdaemon;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import eu.wohlben.qits.projectsdaemon.commands.InvalidCommandRequestException;
+import eu.wohlben.qits.commands.InvalidCommandRequestException;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 

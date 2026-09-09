@@ -1,12 +1,21 @@
 package eu.wohlben.qits.projectsdaemon;
 
-import eu.wohlben.qits.projectsdaemon.agents.AgentSessionNodeDto;
-import eu.wohlben.qits.projectsdaemon.agents.AgentSubagentDto;
-import eu.wohlben.qits.projectsdaemon.agents.AgentType;
+import eu.wohlben.qits.agents.AgentLaunchMode;
+import eu.wohlben.qits.agents.AgentLaunchRequest;
+import eu.wohlben.qits.agents.AgentMcpScope;
+import eu.wohlben.qits.agents.AgentNotSignedInException;
+import eu.wohlben.qits.agents.AgentSessionNodeDto;
+import eu.wohlben.qits.agents.AgentSubagentDto;
+import eu.wohlben.qits.agents.AgentSurface;
+import eu.wohlben.qits.agents.AgentType;
+import eu.wohlben.qits.agents.HarnessCapabilities;
+import eu.wohlben.qits.commands.InvalidCommandRequestException;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import java.time.Instant;
 import java.util.List;
+import java.util.Locale;
+import java.util.function.Function;
 
 /**
  * The agent surface's response bodies, built by hand with {@code io.vertx.core.json} exactly as
@@ -27,17 +36,145 @@ final class AgentJson {
 
   /** {@code POST /agents} — the launched command, in the same shape the commands routes use. */
   static JsonObject launched(
-      eu.wohlben.qits.projectsdaemon.commands.Command command, String projectId, String repoName) {
+      eu.wohlben.qits.commands.Command command, String projectId, String repoName) {
     return new JsonObject().put("command", CommandJson.command(command, projectId, repoName));
   }
 
-  /** {@code GET /agents/available} — the harnesses this daemon can launch, and the default. */
-  static JsonObject available(AgentType defaultAgent) {
+  /**
+   * {@code GET /agents/available} — the harnesses this daemon can launch, the default, and what
+   * each harness in <em>this container's image</em> can actually be configured with.
+   *
+   * <p><b>The capability half is answered from a report taken once, at boot.</b> Producing it means
+   * running the harness binaries ({@code claude --help}, {@code kimi provider list --json}), which
+   * is why it cannot be produced per request and cannot be produced host-side at all: the binaries
+   * live in the image, and the editor that needs the values is a platform-wide route with no
+   * container in front of it. qits-projects caches what this answers, keyed by harness and image
+   * version, and the editor's model and effort dropdowns read that cache.
+   *
+   * <p>It matters that this daemon answers it and not only the workspace one: a project's agent
+   * container may run a different image build than any given workspace, and the editor should read a
+   * catalogue reflecting what will actually run each surface.
+   *
+   * <p>{@code imageVersion} and {@code reportedBy} name where the report came from. Both are emitted
+   * even when blank, because the host fills a blank from the pin it created this container with —
+   * absent and empty are the same thing there, and a daemon that names them wins.
+   *
+   * @param capabilities one report per harness, or empty for a daemon that could not take one. An
+   *     empty array is the <em>absent</em> case the host treats as "nothing to record", never a
+   *     failure
+   */
+  static JsonObject available(
+      AgentType defaultAgent,
+      String imageVersion,
+      String reportedBy,
+      List<HarnessCapabilities> capabilities) {
     JsonArray agents = new JsonArray();
     for (AgentType type : AgentType.values()) {
       agents.add(type.name());
     }
-    return new JsonObject().put("agents", agents).put("defaultAgent", defaultAgent.name());
+    JsonArray reports = new JsonArray();
+    for (HarnessCapabilities report : capabilities == null ? List.<HarnessCapabilities>of() : capabilities) {
+      // The library builds the object; nothing here reshapes it. A relay that reshaped would be a
+      // third place the contract with AgentHarnessCapabilityDto could drift.
+      reports.add(report.toJson());
+    }
+    return new JsonObject()
+        .put("agents", agents)
+        .put("defaultAgent", defaultAgent.name())
+        .put("imageVersion", imageVersion == null ? "" : imageVersion)
+        .put("reportedBy", reportedBy == null ? "" : reportedBy)
+        .put("capabilities", reports);
+  }
+
+  /**
+   * {@code POST /agents} — the launch request, with every enum validated the way a query parameter
+   * is: an unparseable value is a 400 rather than a silent default.
+   *
+   * <h2>The surface, and the desk it replaced</h2>
+   *
+   * <p>{@code surface} is where in the product the session was started from — the key its
+   * configuration is stored under and the value that comes back on the command. A <em>missing</em>
+   * one resolves to what the request's shape implies ({@link AgentLaunchRequest#surfaceOrDefault()})
+   * for one release, so this daemon could ship before the frontend that sends it; an
+   * <em>unknown</em> one is a 400, like an unknown scope, because a misspelled surface that fell
+   * through to a default would be a misconfigured caller that looks like a working one.
+   *
+   * <p><b>{@code desk} is still accepted, and it is a wire-level compatibility mapping and nothing
+   * more.</b> {@code AgentDesk} no longer exists — the two-valued enum retired into the surface
+   * vocabulary — so the two names are translated here, at the door: {@code EPICS} is {@link
+   * AgentSurface#PROJECT_EPICS} and {@code TICKETS} is {@link AgentSurface#PROJECT_TICKETS}. A
+   * frontend that has not shipped the new field keeps working for one release; task 56a914b7 is
+   * where the field goes.
+   *
+   * <p>An explicit {@code surface} wins over {@code desk}: a caller that sends both is a caller
+   * mid-migration, and the new key is the one it means.
+   */
+  static AgentLaunchRequest launchRequest(JsonObject json) {
+    return new AgentLaunchRequest(
+        parseEnum(json.getString("scope"), AgentMcpScope::valueOf, "scope"),
+        surfaceOf(json.getString("surface"), json.getString("desk")),
+        parseEnum(json.getString("mode"), AgentLaunchMode::valueOf, "mode"),
+        json.getString("initialContext"),
+        json.getString("resumeSessionId"),
+        Boolean.TRUE.equals(json.getBoolean("fork")),
+        Boolean.TRUE.equals(json.getBoolean("deliverTaskPrompt")),
+        parseEnum(json.getString("agentType"), AgentType::valueOf, "agentType"));
+  }
+
+  /**
+   * The surface a launch names, or the desk it still names instead, or null for "the caller said
+   * neither" — which the library resolves from the request's shape for one release.
+   */
+  private static AgentSurface surfaceOf(String surface, String desk) {
+    if (surface != null && !surface.isBlank()) {
+      // Unknown is refused, by AgentSurface.of, with the message the API answers as a 400.
+      return AgentSurface.of(surface);
+    }
+    if (desk == null || desk.isBlank()) {
+      return null;
+    }
+    return switch (desk.trim().toUpperCase(Locale.ROOT)) {
+      case "EPICS" -> AgentSurface.PROJECT_EPICS;
+      case "TICKETS" -> AgentSurface.PROJECT_TICKETS;
+      default -> throw new InvalidCommandRequestException("Invalid desk: " + desk);
+    };
+  }
+
+  /**
+   * Enum-valued request fields. Null and blank mean "not stated" and are left for the launch to
+   * default; anything else must parse.
+   */
+  private static <T> T parseEnum(String raw, Function<String, T> of, String name) {
+    if (raw == null || raw.isBlank()) {
+      return null;
+    }
+    try {
+      return of.apply(raw.toUpperCase(Locale.ROOT));
+    } catch (IllegalArgumentException e) {
+      throw new InvalidCommandRequestException("Invalid " + name + ": " + raw);
+    }
+  }
+
+  /**
+   * The 409 body a launch against a harness nobody has signed in answers with.
+   *
+   * <p><b>{@code error} is a required discriminator and is the whole point of this shape.</b> The
+   * caller has to tell "nobody is signed in" from "this daemon is broken" without reading prose: a
+   * frontend matching the case on {@code message} would be the same display-string-as-contract
+   * mistake the {@code " (tickets desk)"} match was, and it would freeze a sentence written for a
+   * human. With the key, the sentence is free to be reworded and translated.
+   *
+   * <p>{@code agentType} is there so the caller can name the harness — and open the right sign-in
+   * terminal at {@code POST /agents/sign-in} — without parsing it out of the message.
+   *
+   * <p>{@code message} keeps the key every other error body on this server uses, so a client with no
+   * special handling still shows something true.
+   */
+  static JsonObject notSignedIn(AgentNotSignedInException refusal) {
+    return new JsonObject()
+        .put("error", "not-signed-in")
+        .put("agentType", refusal.harness() == null ? null : refusal.harness().name())
+        .put("message", refusal.getMessage());
   }
 
   /** {@code GET /agent-sessions} — the session tree. */
