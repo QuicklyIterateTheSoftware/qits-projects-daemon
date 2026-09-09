@@ -514,7 +514,8 @@ public class ProjectsApi {
       //
       // The `error` discriminator is the point of the body. A caller matching this case on the
       // MESSAGE would be the display-string-as-contract mistake this epic exists to delete (the
-      // frontend's " (tickets desk)" match), and it would freeze a sentence written for a human.
+      // frontend's old " (tickets desk)" match, now gone), and it would freeze a sentence written
+      // for a human.
       // The key is machine-readable, the harness is named rather than parsed out of prose, and the
       // sentence stays free to be reworded.
       return new Reply(409, AgentJson.notSignedIn(e));

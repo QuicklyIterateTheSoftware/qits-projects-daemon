@@ -12,9 +12,9 @@ import org.junit.jupiter.api.Test;
 /**
  * The one key the surface work adds to a command body — and the one case in which it is absent.
  *
- * <p>It is what lets the frontend stop matching {@code " (tickets desk)"} in a display name to tell
- * a tickets session from an epics one. The name keeps its text for now, so nothing running gets
- * renamed while the two sides ship.
+ * <p>It is what let the frontend stop matching {@code " (tickets desk)"} in a display name to tell
+ * a tickets session from an epics one — that match is deleted now, so the name below is a label the
+ * test happens to use, not a key anything reads.
  */
 class CommandJsonTest {
 

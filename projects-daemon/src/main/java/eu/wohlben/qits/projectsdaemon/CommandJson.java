@@ -62,9 +62,11 @@ final class CommandJson {
     // same value either way.
     // Where in the product this session was started from, for an agent command that named one.
     // Absent for every non-agent command, for the sign-in terminal (which is nobody's surface), and
-    // for every agent command launched before the surface became a value that travels — which is
-    // why the frontend keeps reading the " (tickets desk)" suffix off actionName as a fallback for
-    // one release, and why that fallback is a dated crutch rather than the contract it used to be.
+    // for every agent command launched before the surface became a value that travels. Those older
+    // rows simply have no surface now: the frontend used to read the " (tickets desk)" suffix off
+    // actionName to place them, and that match is deleted (task 46e32cb3), so they lose their desk
+    // grouping rather than keep a display-string contract alive forever. actionName is a label
+    // again, and nothing parses it.
     putIfPresent(body, "agentSurface", command.agentSurface());
     putIfPresent(body, "commitHash", command.commitHash());
     putIfPresent(body, "shortCommitHash", shortCommitHash(command.commitHash()));

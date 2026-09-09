@@ -39,16 +39,15 @@ class AgentJsonTest {
   }
 
   @Test
-  void aMissingSurfaceIsLeftForTheLibraryToImply() {
+  void aMissingSurfaceIsLeftForTheLaunchToRefuse() {
     AgentLaunchRequest request =
         AgentJson.launchRequest(new JsonObject().put("scope", "PROJECT"));
 
     assertNull(request.surface(), "nothing is invented at the door");
-    assertEquals(
-        AgentSurface.PROJECT_EPICS,
-        request.surfaceOrDefault(),
-        "a PROJECT-scoped launch is this container's epics desk — the shape-implied guess, and a"
-            + " dated migration crutch rather than a contract");
+    assertThrows(
+        InvalidCommandRequestException.class,
+        request::requiredSurface,
+        "and the library refuses it rather than guessing — the shape-implied default is gone");
   }
 
   @Test
@@ -66,47 +65,27 @@ class AgentJsonTest {
   }
 
   /**
-   * The desk field is a wire-level compatibility mapping now: {@code AgentDesk} is gone from the
-   * library, and these two names are translated here so a frontend that has not shipped the surface
-   * keeps working for one release.
+   * The desk field is gone. It was a wire-level mapping of {@code AgentDesk}'s two names onto their
+   * surfaces, kept for one release so a frontend that had not shipped the surface stayed working;
+   * every frontend sends the surface now, so the surface is the only steering key left. A body
+   * still carrying {@code desk} is not translated and not rejected for carrying it — it is simply a
+   * body that named no surface, which is what gets refused.
    */
   @Test
-  void theDeskFieldStillMapsOntoItsSurface() {
-    assertEquals(
-        AgentSurface.PROJECT_EPICS,
-        AgentJson.launchRequest(new JsonObject().put("scope", "PROJECT").put("desk", "EPICS"))
-            .surface());
-    assertEquals(
-        AgentSurface.PROJECT_TICKETS,
+  void theDeskFieldIsNoLongerRead() {
+    assertNull(
         AgentJson.launchRequest(new JsonObject().put("scope", "PROJECT").put("desk", "TICKETS"))
-            .surface());
-    assertEquals(
-        AgentSurface.PROJECT_TICKETS,
-        AgentJson.launchRequest(new JsonObject().put("scope", "PROJECT").put("desk", "tickets"))
             .surface(),
-        "case-insensitively, exactly as the enum parse was");
-  }
-
-  @Test
-  void aSurfaceWinsOverTheDeskThatIsBeingReplaced() {
-    AgentLaunchRequest request =
-        AgentJson.launchRequest(
-            new JsonObject()
-                .put("scope", "PROJECT")
-                .put("desk", "EPICS")
-                .put("surface", "project.tickets"));
-
+        "an unread field, not a second steering key");
     assertEquals(
         AgentSurface.PROJECT_TICKETS,
-        request.surface(),
-        "a caller sending both is mid-migration and means the new key");
-  }
-
-  @Test
-  void anUnknownDeskIsRefused() {
-    assertThrows(
-        InvalidCommandRequestException.class,
-        () -> AgentJson.launchRequest(new JsonObject().put("scope", "PROJECT").put("desk", "TASKS")));
+        AgentJson.launchRequest(
+                new JsonObject()
+                    .put("scope", "PROJECT")
+                    .put("desk", "EPICS")
+                    .put("surface", "project.tickets"))
+            .surface(),
+        "and it cannot contradict the surface, because nothing looks at it");
   }
 
   @Test

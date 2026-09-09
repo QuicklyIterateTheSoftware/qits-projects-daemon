@@ -41,7 +41,16 @@
         <!-- The shared harness library, released from qits-coding-agents. A CalVer coordinate, not
              a range: a daemon runs the library version it was built against, so changing harness
              behaviour is a two-step — release the library, then bump this line and release this
-             daemon. That is the cost of the two copies becoming one, and it is deliberate. -->
+             daemon. That is the cost of the two copies becoming one, and it is deliberate.
+
+             *** MUST BE BUMPED BEFORE THIS DAEMON IS RELEASED. *** The value below is the library
+             release that still carries the shape-implied surface fallback. Task 747a0225 removes
+             that fallback in the library, and this daemon has stopped reading the `desk` field
+             (task 56a914b7) — so released against the line as it stands, a launch body carrying
+             neither key would be *guessed* at rather than refused, which is precisely the crutch
+             this cutover exists to remove. Bump this to the library release carrying 747a0225, then
+             release. The daemon's suite compiles against requiredSurface(), so a stale pin fails
+             the build rather than shipping quietly; that is on purpose. -->
         <qits-coding-agents.version>2026.909.111643</qits-coding-agents.version>
 
         <!-- Where the platform publishes it. Overridden by CI (-Dqits.maven.repository.url) and by

@@ -93,26 +93,22 @@ final class AgentJson {
    * <h2>The surface, and the desk it replaced</h2>
    *
    * <p>{@code surface} is where in the product the session was started from — the key its
-   * configuration is stored under and the value that comes back on the command. A <em>missing</em>
-   * one resolves to what the request's shape implies ({@link AgentLaunchRequest#surfaceOrDefault()})
-   * for one release, so this daemon could ship before the frontend that sends it; an
-   * <em>unknown</em> one is a 400, like an unknown scope, because a misspelled surface that fell
-   * through to a default would be a misconfigured caller that looks like a working one.
+   * configuration is stored under and the value that comes back on the command. It is required:
+   * an unknown one is a 400 here ({@link AgentSurface#of}), and a missing one is a 400 from the
+   * library, which no longer guesses one from the request's shape.
    *
-   * <p><b>{@code desk} is still accepted, and it is a wire-level compatibility mapping and nothing
-   * more.</b> {@code AgentDesk} no longer exists — the two-valued enum retired into the surface
-   * vocabulary — so the two names are translated here, at the door: {@code EPICS} is {@link
-   * AgentSurface#PROJECT_EPICS} and {@code TICKETS} is {@link AgentSurface#PROJECT_TICKETS}. A
-   * frontend that has not shipped the new field keeps working for one release; task 56a914b7 is
-   * where the field goes.
-   *
-   * <p>An explicit {@code surface} wins over {@code desk}: a caller that sends both is a caller
-   * mid-migration, and the new key is the one it means.
+   * <p><b>{@code desk} is gone.</b> It was a wire-level compatibility mapping and nothing else —
+   * {@code AgentDesk} had already retired into the surface vocabulary, and this door translated its
+   * two names ({@code EPICS}, {@code TICKETS}) for one release so a frontend that had not shipped
+   * the new field kept working. Every frontend sends {@code surface} now, so the translation comes
+   * out (task 56a914b7) and the surface is the only steering key left in the system. A caller still
+   * sending {@code desk} is ignored rather than served: an unnamed surface is refused, which is the
+   * answer it should get.
    */
   static AgentLaunchRequest launchRequest(JsonObject json) {
     return new AgentLaunchRequest(
         parseEnum(json.getString("scope"), AgentMcpScope::valueOf, "scope"),
-        surfaceOf(json.getString("surface"), json.getString("desk")),
+        surfaceOf(json.getString("surface")),
         parseEnum(json.getString("mode"), AgentLaunchMode::valueOf, "mode"),
         json.getString("initialContext"),
         json.getString("resumeSessionId"),
@@ -122,22 +118,15 @@ final class AgentJson {
   }
 
   /**
-   * The surface a launch names, or the desk it still names instead, or null for "the caller said
-   * neither" — which the library resolves from the request's shape for one release.
+   * The surface a launch names, or null for "the caller named none" — which the launch itself
+   * refuses, so the 400 distinguishes an unknown surface from an absent one.
    */
-  private static AgentSurface surfaceOf(String surface, String desk) {
-    if (surface != null && !surface.isBlank()) {
-      // Unknown is refused, by AgentSurface.of, with the message the API answers as a 400.
-      return AgentSurface.of(surface);
-    }
-    if (desk == null || desk.isBlank()) {
+  private static AgentSurface surfaceOf(String surface) {
+    if (surface == null || surface.isBlank()) {
       return null;
     }
-    return switch (desk.trim().toUpperCase(Locale.ROOT)) {
-      case "EPICS" -> AgentSurface.PROJECT_EPICS;
-      case "TICKETS" -> AgentSurface.PROJECT_TICKETS;
-      default -> throw new InvalidCommandRequestException("Invalid desk: " + desk);
-    };
+    // Unknown is refused, by AgentSurface.of, with the message the API answers as a 400.
+    return AgentSurface.of(surface);
   }
 
   /**
