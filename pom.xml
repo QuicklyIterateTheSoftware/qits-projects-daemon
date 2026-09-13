@@ -47,7 +47,7 @@
              is refused rather than guessed at. This daemon stopped reading the `desk` field in the
              same cutover (task 56a914b7), so the two belong together — on the older pin a body
              carrying neither key would have been guessed. -->
-        <qits-coding-agents.version>2026.909.122712</qits-coding-agents.version>
+        <qits-coding-agents.version>2026.913.194041</qits-coding-agents.version>
 
         <!-- Where the platform publishes it. Overridden by CI (-Dqits.maven.repository.url) and by
              the image build's QITS_MAVEN_REPOSITORY_URL build-arg; the default is the address a
