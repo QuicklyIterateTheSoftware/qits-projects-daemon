@@ -42,8 +42,10 @@ COPY .mvn/ .mvn/
 RUN ./mvnw --version
 
 # The whole reactor, not a module list. `-am` builds projects-daemon's dependencies from source —
-# they are 1.0.0-SNAPSHOTs this repo never publishes (no distributionManagement, no <repositories>),
-# so a builder container with an empty ~/.m2 has nowhere else to get them. Copying module by module
+# `qits-projects-daemon-protocol` is at this reactor's own CalVer, and while a release does now
+# publish that jar, the publish happens in a LATER step of the release pipeline than this build, so
+# a builder container with an empty ~/.m2 still has nowhere but the reactor to get it. Building it
+# from source here is also what keeps the image and the jar the same bytes. Copying module by module
 # would mean editing this file every time one is added, and forgetting to would fail the build with
 # an unresolved dependency rather than anything that names the real cause. `.dockerignore` is what
 # keeps this cheap — without it this line drags in every target/ dir.
@@ -99,8 +101,11 @@ RUN --mount=type=secret,id=qits-client-id \
 # document the first run already had the model for. One RUN, one layer, one truth.
 #
 # cyclonedx.skipNotDeployed=false is LOAD-BEARING, measured in qits-artifacts-service on its first
-# release: `projects-daemon` is <packaging>quarkus</packaging> and ships as this image rather than
-# as a jar, so it skips maven-deploy — and the plugin SKIPS deploy-skipping modules by default, with
+# release: `projects-daemon` is <packaging>quarkus</packaging> and ships as this image (and, below,
+# as a runnable jar in the `daemons` store) rather than as a Maven artifact, so it skips
+# maven-deploy — still true now that the reactor publishes `qits-projects-daemon-protocol`, which is
+# deployed by a separate step of `.config/qits/ci-event-release.yml` and not from in here at all.
+# The plugin SKIPS deploy-skipping modules by default, with
 # a green build and one INFO line. The sbom stage's COPY then fails on a file nothing wrote. The
 # spelling matters too: a bare -DskipNotDeployed=false is silently ignored, and only the
 # cyclonedx.-prefixed property reaches the plugin.
@@ -119,6 +124,57 @@ RUN --mount=type=secret,id=qits-client-id \
 # rather than from a Maven closure that would describe only half of it.
 FROM scratch AS sbom
 COPY --from=build /src/projects-daemon/target/sbom.json /sbom.json
+
+# --- runnable ---------------------------------------------------------------------------------------
+# The daemon as a RUNNABLE JAR, for qits-projects' pin test to download and execute.
+#
+# WHAT IT IS FOR. qits-projects pins the `qits/project-agent` image through this repository's
+# released `qits-projects-daemon-protocol` jar (see ProjectAgentImage), and its pin test starts THIS
+# daemon — at exactly the version that dependency names — against localhost and round-trips the real
+# control-socket protocol before any agent container uses the pair. A container is out: CI step
+# containers have no docker (`--cap-drop=ALL`, no privilege, no socket under `build: true`), and what
+# the service talks to is the daemon inside the image, not the image.
+#
+# WHY A JAR AND NOT THE BARE NATIVE BINARY. The binary is compiled in the `build` stage above on
+# `ubi9-quarkus-mandrel-builder-image` and runs, in the runtime stage below, on `ubi9/ubi-minimal` —
+# so it is dynamically linked against **glibc**. Every one of this platform's CI step images is
+# Alpine (`maven-base` is maven:3.9-eclipse-temurin-25-alpine, `ci-base` is docker:cli), so **musl**.
+# A bare native binary would therefore be an artifact the consumer's gate could never execute: the
+# test would `assumeTrue`-skip for ever, which is the one outcome worse than having no pin test at
+# all. A jar runs on the JDK `maven-base` already carries.
+#
+# WHAT THE PIN TEST THEREFORE PROVES, AND WHAT IT DOES NOT. Same source, same reactor, same version,
+# so the wire contract it exercises is exactly the one the image's daemon speaks — and the protocol
+# is what a daemon bump breaks. It does NOT prove the native image's own linkage or its reflection
+# registration; those stay covered where they belong, by this repository's own pipeline — this
+# Dockerfile's native compile and the ITs that run against it — not by the consumer's.
+#
+# A SECOND `./mvnw`, AND THE ONLY OTHER ONE IN THIS FILE. It cannot ride the native RUN above — one
+# Maven invocation produces one packaging — but it is a JVM package of a reactor already resolved
+# into that layer's cache, so it costs seconds against a native compile's minutes. Same secrets, same
+# settings file, same `-Dqits.maven.repository.url` as the native RUN, because it resolves the same
+# released harness jars.
+FROM build AS runnable
+RUN --mount=type=secret,id=qits-client-id \
+    --mount=type=secret,id=qits-client-secret \
+    QITS_MAVEN_AUTH_USR="$(cat /run/secrets/qits-client-id 2>/dev/null || true)" \
+    QITS_MAVEN_AUTH_PSW="$(cat /run/secrets/qits-client-secret 2>/dev/null || true)" \
+    ./mvnw -B -ntp -s .qits-maven-settings.xml -pl projects-daemon -am package -DskipTests \
+      -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
+      -Dquarkus.package.jar.enabled=true \
+      -Dquarkus.package.jar.type=uber-jar
+
+# The export stage proper: `FROM scratch` holding the one file, so `--output type=local` writes a
+# directory with the jar in it and nothing else.
+#
+# THE FILENAME IS STABLE AND NOT `-runner`. `application.properties` sets
+# `quarkus.package.output-name=qits-projects-daemon` AND `quarkus.package.jar.add-runner-suffix=false`
+# — the same pair that gives the native binary its suffix-free name — so the uber-jar comes out as
+# `target/qits-projects-daemon.jar`. If either of those lines is ever dropped, Quarkus writes
+# `qits-projects-daemon-runner.jar` and this COPY fails loudly at build time, which is the right
+# place for it: the consumer downloads this file by a name the release step hardcodes.
+FROM scratch AS binary
+COPY --from=runnable /src/projects-daemon/target/qits-projects-daemon.jar /qits-projects-daemon.jar
 
 # --- runtime --------------------------------------------------------------------------------------
 # `mirror.dev.localhost:8080/redhat/…` is the same mirror, pointed at registry.access.redhat.com.

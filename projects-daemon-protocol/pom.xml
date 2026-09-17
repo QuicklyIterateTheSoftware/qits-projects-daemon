@@ -9,13 +9,38 @@
         <relativePath>../pom.xml</relativePath>
     </parent>
 
-    <artifactId>projects-daemon-protocol</artifactId>
+    <!-- PUBLISHED COORDINATES, and they deliberately do not inherit the parent's. `eu.wohlben.qits:
+         qits-*` is what every artifact this platform publishes is called (qits-auth-core,
+         qits-db-core, qits-eventstream, qits-workspace-daemon-protocol), and this module joined
+         them the day qits-projects started taking the `qits/project-agent` image version from a
+         released dependency instead of a configuration entry — see ProjectAgentImage.
+
+         THE COORDINATE IT LANDS ON IS THE ONE THE VENDORED COPY ALREADY OCCUPIES, and that is not
+         an accident to be tidied up — it is the vendored module's own plan coming due.
+         qits-projects-service's `projects-daemon-protocol/` is `eu.wohlben.qits:
+         qits-projects-daemon-protocol` at ITS reactor's calver, and its pom says in as many words
+         that "the day this artifact is published somewhere, deleting this module and adding a
+         <dependency> is a one-line change with no source edits". That day is this one, and landing
+         on the same groupId:artifactId is what makes it one line: the consumer deletes the module
+         and the same two strings resolve from the registry instead of the reactor.
+
+         Until that consumer release lands there are briefly two things called
+         `eu.wohlben.qits:qits-projects-daemon-protocol` — this one at this repository's calver, that
+         one at qits-projects' — which is harmless because they are different VERSIONS and because
+         the consumer does not depend on the published one yet. It is also why the two must not sit
+         in that state for long. -->
+    <groupId>eu.wohlben.qits</groupId>
+    <artifactId>qits-projects-daemon-protocol</artifactId>
 
     <!-- The projects-daemon control-plane wire contract: plain records + enums + the shared
          type/field-name constants, framework-free and dependency-free. Both ends depend on it so
-         neither owns the protocol — qits-projects vendors this module's sources rather than
-         consuming a published jar (see AGENTS.md, "The vendoring contract"). No JSON library here
-         on purpose: serialization lives on each side against whatever it already carries. -->
+         neither owns the protocol. No JSON library here on purpose: serialization lives on each
+         side against whatever it already carries.
+
+         IT CARRIES THE RELEASE'S OWN VERSION TOO ({@code ProjectAgentImage}), which is why it is
+         the module that gets deployed rather than a second "pin" jar beside it: the thing a
+         consumer must pin and the thing it must speak are the same release, and one artifact
+         cannot ship half of that pair. -->
 
     <dependencies>
         <dependency>
@@ -26,6 +51,38 @@
     </dependencies>
 
     <build>
+        <!-- FILTERING IS ON FOR THIS MODULE'S ONE RESOURCE AND NOTHING ELSE. The include/exclude
+             pair is not belt-and-braces: filtering every resource would rewrite any future binary
+             fixture that happens to contain `${`, and this module is the wire contract — a corrupt
+             fixture here is a wrong assertion, not a build error. ProjectAgentImage refuses an
+             unfiltered value, so switching this block off fails loudly rather than shipping the
+             literal `${project.version}` as an image tag.
+
+             THE DELIMITERS HERE ARE MAVEN'S DEFAULTS, `${...}`, AND THAT IS NOT AN OVERSIGHT. The
+             sibling `projects-daemon/pom.xml` configures maven-resources-plugin with
+             `<useDefaultDelimiters>false</useDefaultDelimiters>` and `@` only, so that Quarkus's
+             own `${config.expression}` references in its application.properties survive filtering.
+             That configuration is MODULE-LOCAL — it sits in that module's `<build><plugins>`, not
+             in the parent's `<pluginManagement>`, which pins only quarkus/compiler/surefire — so
+             none of it reaches here. If a delimiter override ever moves up to the parent, this
+             module's resource must switch to `@project.version@` in the same edit; the test below
+             is what catches a miss. -->
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+                <includes>
+                    <include>eu/wohlben/qits/projectsdaemon/protocol/project-agent-image.properties</include>
+                </includes>
+            </resource>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>false</filtering>
+                <excludes>
+                    <exclude>eu/wohlben/qits/projectsdaemon/protocol/project-agent-image.properties</exclude>
+                </excludes>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <artifactId>maven-compiler-plugin</artifactId>

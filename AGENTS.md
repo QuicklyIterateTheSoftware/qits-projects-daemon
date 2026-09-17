@@ -10,6 +10,9 @@ repository. Read it before adding anything back.
 ## Modules
 
     projects-daemon-protocol/   the wire contract: records, the codec, the constants. No dependencies.
+                                Published as `eu.wohlben.qits:qits-projects-daemon-protocol`, and it
+                                carries this release's version as the `qits/project-agent` image tag
+                                (`ProjectAgentImage`) — see "The published contract" below.
     projects-daemon/            the Quarkus module: sockets, provisioning, the loopback API.
 
 ## The harness is a dependency, not a module
@@ -60,19 +63,26 @@ Tests that need a PTY are `@EnabledOnOs(LINUX)` — `ForeignPty` calls libc thro
 `java.lang.foreign`, and the descriptors are Linux ABI. Keep that annotation on anything that
 spawns.
 
-## The vendoring contract
+## The published contract
 
-`projects-daemon-protocol` is a **source module, vendored** into qits-projects-service — not a
-published jar. That repository copies these sources into its own tree so both ends encode and
-decode against one mapping.
+`projects-daemon-protocol` is **a released jar**, `eu.wohlben.qits:qits-projects-daemon-protocol`,
+and qits-projects-service depends on it. It was a source module vendored into that repository until
+the agent image version became a pom line there; the vendoring contract this section used to record
+is repealed, and with it the three-edit ordering that ended in editing a copy.
 
-Nothing at build time notices when the two copies drift. **`DaemonCodecTest` is the drift
-detector**, and it only works if it is vendored alongside the sources and run on both sides. A
-change to the protocol is therefore three edits, in this order:
+**Its version is the `qits/project-agent` image tag.** `ProjectAgentImage.VERSION` is this module's
+`${project.version}`, filtered into a resource at build time, and the release pipeline tags both
+images with the version it stamped that pom with. So the thing a consumer must pin and the thing it
+must speak are one artifact and one release, and there is no way to bump one without the other.
+
+A change to the protocol is therefore:
 
 1. the record and the `DaemonProtocol` constants here,
 2. `DaemonCodecTest` here, green,
-3. the same files vendored into qits-projects-service, its suite green.
+3. handled in qits-projects-service — **in its own release, after this one**. The module is not
+   mirrored there any more: the new message reaches that repository as a version bump on its pom and
+   is gated by *its* release request. That is slower than editing a vendored copy and it is the
+   point — the host that must understand a frame is the one whose gate now sees the change.
 
 Bump `CAPABILITY_VERSION` whenever the backend must branch on the change. It starts at **1**, not
 at the workspace daemon's 4: the two protocols share a shape and a lineage but not a namespace,
@@ -392,3 +402,35 @@ directly and never resolve config.
 - **Nothing blocks the event loop.** Frames arrive on a Vert.x event loop. Process launches and git
   reads go to a worker pool, and every reply is marshalled back onto the connection's context to
   write.
+
+## A release publishes four artifacts out of one build
+
+`.config/qits/ci-event-release.yml` declares them and carries the reasoning; the short form:
+
+- `qits/projects-daemon` — the binary's distribution image, as before.
+- `qits/project-agent` — that image layered onto the released toolchain, as before. This is what a
+  refinement run actually starts.
+- `qits-projects-daemon` (a `daemon` artifact) — the daemon as a **runnable uber-jar**, JVM-packaged
+  on top of the same `build` stage (`--opt target=binary`) and PUT to qits-artifacts' `daemons`
+  store. Not an image: qits-projects' pin test starts the daemon as a **process**, and a CI step
+  container has no docker.
+
+  **A jar and not the native binary, and that is not a shortcut.** Every CI step image on this
+  platform is Alpine — `maven-base` is `maven:3.9-eclipse-temurin-25-alpine`, `ci-base` is
+  `docker:cli` — so **musl**, while the native image is compiled on UBI9 and run on ubi-minimal, so
+  **glibc**. A bare native binary would be an artifact the consumer's gate could never execute,
+  skipping for ever, which is worse than having no pin test. What the pin test covers is the wire
+  contract; what it does not is the native image's own linkage and reflection registration, and those
+  stay covered by this repository's own pipeline.
+- `eu.wohlben.qits:qits-projects-daemon-protocol` — the wire contract plus `ProjectAgentImage`,
+  which carries this release's version. **This is what makes the agent image version a pom line in
+  qits-projects instead of a `qits-configuration` entry rewritten underneath it.**
+
+**The jar's `${project.version}`, both image tags and the daemon binary's coordinate are one string
+by construction**, and the construction is the only thing holding them together: the tags come from
+the `SCMRelease` payload, the jar's version comes from the checked-out pom, and they agree because
+the release flow stamps the pom with the version it tags and both steps check that tag out.
+
+**Do not add a way to publish one without the others.** A "just the jar" or "just the image" path is
+a pin that names bytes nobody published, or bytes nobody can pin — which is the failure the four
+entries exist to remove, re-introduced by a convenience.

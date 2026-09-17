@@ -39,10 +39,27 @@
 # `.config/qits/workspace-base.version` file; the file went with it, because a pin the machine reads
 # has to sit where the machine looks.
 #
+# ONE BUILD, FOUR ARTIFACTS — and the two new ones are not two more builds. `artifacts:` gained a
+# `daemon` entry and a `maven` entry when qits-projects stopped taking the agent image version from a
+# qits-configuration entry and started taking it from a released dependency. The daemon entry is an
+# EXPORT of the same build the first image comes from (`--opt target=binary`, a stack of cache hits),
+# and the maven entry is one extra `./mvnw` over a dependency-free module in a second, maven-imaged
+# step. Neither compiles the native binary a second time, and both exist so a CONSUMER can pin this
+# release instead of being handed it. `artifacts:` says which; ProjectAgentImage says why.
+#
 # `artifacts:` IS A DECLARATION, NOT A REPORT. qits-ci never learns how to publish anything — the
-# `buildctl` pushes below are this repository's own step — so it cannot see what landed. It announces
-# one `SoftwareRelease` per entry on the strength of these lines once the whole pipeline is green.
-# Keep them true.
+# `buildctl` pushes and the `./mvnw deploy` below are this repository's own steps — so it cannot see
+# what landed. It announces one `SoftwareRelease` per entry on the strength of these lines once the
+# whole pipeline is green. Keep them true.
+#
+# THE FOUR COORDINATES CARRY ONE VERSION STRING, AND NOTHING CHECKS THAT THEY DO. Read this before
+# changing where `version` comes from: the two image tags and the `daemons` coordinate are taken from
+# the `SCMRelease` PAYLOAD, while the jar's version is `${project.version}` of the CHECKED-OUT POM —
+# two different sources for what must be one string. They agree only because the release flow stamps
+# the pom with the version it is about to tag, and because both steps below check that same tag out.
+# A change that derives the tag from anywhere else (a floating name, a computed suffix, a payload
+# field the release flow does not stamp) silently publishes an image under one string and a pin
+# naming another, and the failure surfaces a repository away as a container that will not start.
 #
 # THE NAMES ARE UNQUALIFIED ON PURPOSE. No registry-qualified reference is portable here — the
 # registry is `qits-platform-artifacts:8080` inside a step container and `localhost:8081` to qits-ci
@@ -104,6 +121,21 @@ checkout:
 artifacts:
   - { type: docker, name: qits/projects-daemon }
   - { type: docker, name: qits/project-agent }
+  # THE RUNNABLE DAEMON, as a plain file. Not a third image and not a regression to anything
+  # retired: it is a `--opt target=binary` export OF THE SAME BUILD the first entry pushes, so the
+  # two coordinates cannot name different bytes and there is still one native compile and one
+  # reactor. What asks for it is qits-projects' pin test: it starts THIS daemon, at exactly the
+  # version its pom pins, against localhost and round-trips the real control socket before any agent
+  # container does. A container would need docker, and a CI step container has none.
+  - { type: daemon, name: qits-projects-daemon }
+  # THE PIN AND THE PROTOCOL, IN ONE JAR. qits-projects-service used to read the agent image version
+  # out of `env.QITS_PROJECTS_AGENT_IMAGE_VERSION`, a qits-configuration entry its release listener
+  # rewrote on every release of this repository — so a new agent image reached a real refinement run
+  # without the pair ever having been built together. Now the version travels as the version of the
+  # artifact that also carries the wire contract: the consumer depends on it, the maintenance train
+  # bumps it like any internal library, and the consumer's own gate is where a daemon that broke the
+  # protocol fails. ProjectAgentImage's javadoc has the whole reasoning.
+  - { type: maven, name: "eu.wohlben.qits:qits-projects-daemon-protocol" }
 steps:
     # ci-base: buildctl for the builds, git for the tag checkout, jq for the event payload.
     # Nothing needs maven on ANY side of the builder — the reactor is built inside the image's own
@@ -346,3 +378,152 @@ steps:
       curl -fsS -X PUT -H 'Content-Type: application/vnd.cyclonedx+json' \
         --data-binary @sbom-project-agent.json \
         "$sbom_base/docker/qits/project-agent/-/$version"
+
+      # --- the runnable daemon ----------------------------------------------------------------
+      # A THIRD REACH INTO THE SAME BUILD. `target=binary` is a `FROM scratch` holding one file: the
+      # daemon packaged as a runnable uber-jar, JVM-packaged on top of the `build` stage this run has
+      # already produced. Build-arg and secrets are BYTE-IDENTICAL to the daemon image build above —
+      # that is the whole reason this costs seconds and not a second native compile — so if either
+      # list is ever edited, both have to move together.
+      #
+      # WHY IT EXISTS: qits-projects' pin test starts this daemon as a PROCESS, at exactly the
+      # version its pom pins, and round-trips the real control-socket protocol before an agent
+      # container uses the pair. A CI step container has no docker, so it cannot run the image — and
+      # what the service talks to is the daemon inside the image, not the image.
+      #
+      # WHY A JAR AND NOT THE NATIVE BINARY: every step image on this platform is Alpine (musl) and
+      # the native image is built on UBI9 and run on ubi-minimal (glibc), so the bare binary is an
+      # artifact the consumer's gate could never execute — it would skip for ever, which is worse
+      # than having no pin test. docker/Dockerfile's `runnable` stage carries the whole reasoning,
+      # including what the pin test does and does not therefore prove.
+      buildctl build --frontend dockerfile.v0 \
+        --local context=. --local dockerfile=docker \
+        --opt target=binary \
+        --opt build-arg:QITS_MAVEN_REPOSITORY_URL="$QITS_MAVEN_REGISTRY_URL" \
+        --opt build-arg:QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}" \
+        --secret id=qits-client-id,src=/tmp/qits-client-id \
+        --secret id=qits-client-secret,src=/tmp/qits-client-secret \
+        --output type=local,dest=.binary
+
+      # The daemon store is a sibling path of the SBOM store, derived from the same origin and for
+      # the same reason ($QITS_REGISTRY is the host daemon's view and answers curl from in here with
+      # an instant refusal). The path names the DECLARED artifact identity verbatim: `artifacts:`
+      # above says `{type: daemon, name: qits-projects-daemon}`.
+      artifacts_base="${QITS_NPM_REGISTRY_URL%%/artifacts/*}/artifacts"
+
+      # 409 IS A HARD FAILURE, NOT A SKIP — the one place this pipeline differs from a maven or npm
+      # publish. Versions are immutable in the daemon store, so a 409 says the release train tried
+      # to ship a coordinate that is already spoken for; letting it pass would announce a
+      # SoftwareRelease for bytes nobody published. Re-running a maven deploy is a no-op; re-running
+      # this one would be a lie. qits-ci-daemon's and qits-workspace-daemon's pipelines refuse the
+      # same way.
+      status=$(curl -sS -o /tmp/daemon-publish.json -w '%{http_code}' -X PUT \
+        -H 'Content-Type: application/octet-stream' \
+        --data-binary @.binary/qits-projects-daemon.jar \
+        "$artifacts_base/daemons/qits-projects-daemon/$version")
+      case "$status" in
+        201) ;;
+        409)
+          echo "qits-projects-daemon $version is already published — a version is never republished" >&2
+          cat /tmp/daemon-publish.json >&2
+          exit 1 ;;
+        *)
+          echo "publish answered $status: $(cat /tmp/daemon-publish.json)" >&2
+          exit 1 ;;
+      esac
+
+      # The jar's bill of materials is the daemon module's, which is the document `target=sbom`
+      # already exported above — the same reactor closure, published a second time under the
+      # coordinate the `daemon` declaration names. No fourth buildctl target is invented for it:
+      # `target=sbom` and `target=binary` package the same module out of the same `build` stage, so a
+      # separate document would be the same bytes under a different name. Same bytes, two artifacts,
+      # two coordinates: a consumer asking about either is answered, and neither is told about a
+      # version whose document is missing.
+      curl -fsS -X PUT -H 'Content-Type: application/vnd.cyclonedx+json' \
+        --data-binary @.sbom/sbom.json \
+        "$sbom_base/daemon/qits-projects-daemon/-/$version"
+
+    # --- the pin-and-protocol jar -----------------------------------------------------------------
+    # A SECOND STEP, AND A DIFFERENT IMAGE, because this one needs maven and the one above needs
+    # buildctl. It is deliberately AFTER the image pushes: the jar is what tells qits-projects which
+    # agent image to start, so a jar resolvable before its image is pushed would be a pin pointing at
+    # nothing — briefly, but a release is exactly the moment somebody is watching.
+    #
+    # It compiles the protocol module alone (`-pl`), which is dependency-free apart from junit, so
+    # this step is seconds and shares nothing with the native compile above.
+  - image: qits/build-images/maven-base:latest
+    timeout-seconds: 1800
+    script: |
+      set -eu
+      # EACH STEP IS ITS OWN CONTAINER WITH ITS OWN CLONE, so everything the step above derived has
+      # to be derived again here — the payload is injected into both, the checkout is not shared.
+      version=$(printf '%s' "$QITS_EVENT_PAYLOAD" | jq -er .version)
+      case "$version" in
+        ''|*[!0-9.]*) echo "not a CalVer tag: $version" >&2; exit 1 ;;
+      esac
+      # The tag, for the same reason the step above takes it: main has moved on, the tag has not.
+      # AND IT IS WHAT MAKES THE PIN HONEST: the image tag came from the payload, but the jar's
+      # version is `${project.version}` of THIS tree, filtered into
+      # `project-agent-image.properties`. The two are one string only because the release flow
+      # stamped the pom with the version it tagged — checking out anything but `$version` here
+      # publishes a pin naming a different image than the one just pushed.
+      git fetch "$QITS_CI_REPOSITORY_URL" "refs/tags/$version:refs/tags/$version"
+      git checkout --detach "$version"
+
+      # A published version is never republished, and re-running a deploy of the same bytes is a
+      # no-op rather than a lie — so this one SKIPS where the daemon PUT above fails. That is the
+      # maven and npm release steps' rule, not a weakening of the one above.
+      #
+      # BOTH POMS, and the `&&` is the "skip only when EVERY module is published" rule. The jar
+      # alone is not a published artifact: a consumer cannot read its descriptor without the parent,
+      # and checking one of the two would let a half publish look complete on a re-run.
+      if curl -fsS -o /dev/null \
+        "$QITS_MAVEN_REGISTRY_URL/eu/wohlben/qits/qits-projects-daemon-protocol/$version/qits-projects-daemon-protocol-$version.pom" \
+        && curl -fsS -o /dev/null \
+          "$QITS_MAVEN_REGISTRY_URL/eu/wohlben/qits/$version/qits-$version.pom"; then
+        echo "qits-projects-daemon-protocol $version and its parent are already published — skipping"
+        exit 0
+      fi
+
+      # -s and the three QITS_MAVEN_* variables are docker/Dockerfile's arrangement, in a step
+      # instead of a secret mount: the root pom declares `qits-maven` at an edge vhost that is dead
+      # in here, and `.qits-maven-settings.xml` mirrors that id onto the in-network
+      # $QITS_MAVEN_REPOSITORY_URL (and Central onto the platform's pull-through while
+      # QITS_MAVEN_CENTRAL_URL is non-empty). The names are the ones the settings file's <server>
+      # entries read, verbatim. `-` under set -u: a deployment that commissions nothing sends no
+      # pair, and an anonymous resolve is the state every hand build is in.
+      #
+      # PLAIN `export` LINES, NOT `VAR=… \` PREFIXES ON THE MVN CALL, and the comments sit ABOVE the
+      # block rather than inside it. A `#` line between two continued lines of one command silently
+      # TERMINATES that command in bash: the assignments become a command of their own, the mvn call
+      # below runs with none of them, and the deploy goes out unauthenticated with a green-looking
+      # log. qits-workspace-daemon's copy of this step still carries that shape; do not reproduce it.
+      export QITS_MAVEN_CENTRAL_URL="${QITS_MAVEN_PROXY_URL:-}"
+      export QITS_MAVEN_AUTH_USR="${QITS_COMMISSIONED_CLIENT_ID-}"
+      export QITS_MAVEN_AUTH_PSW="${QITS_COMMISSIONED_CLIENT_SECRET-}"
+
+      # `-am` IS LOAD-BEARING AND IT IS THE PARENT POM. The protocol module declares
+      # `<parent>eu.wohlben:qits:<version></parent>`, so a consumer resolving the jar must be able to
+      # read that pom too — `-pl` alone deploys the jar and NOT its parent, and the consumer then
+      # fails with "Failed to read artifact descriptor … Could not find artifact eu.wohlben:qits:pom"
+      # (qits-workspace-daemon shipped exactly that on 2026.916.172630). The module depends on
+      # nothing in-reactor, so `-am` adds exactly one thing, the aggregator, which is what a parent
+      # is for.
+      ./mvnw -B -ntp -s .qits-maven-settings.xml -pl projects-daemon-protocol -am deploy -DskipTests \
+        -Dqits.maven.repository.url="$QITS_MAVEN_REGISTRY_URL" \
+        -DaltDeploymentRepository="qits::default::$QITS_MAVEN_REGISTRY_URL"
+
+      # Its own document, under its own coordinate — the closure of THIS jar, which is junit-free at
+      # runtime and therefore nearly empty. That is the point: a consumer auditing what it pulled in
+      # by pinning the agent image should see that it pulled in nothing.
+      ./mvnw -B -ntp -s .qits-maven-settings.xml -pl projects-daemon-protocol -DskipTests \
+        -Dqits.maven.repository.url="$QITS_MAVEN_REGISTRY_URL" \
+        org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeBom \
+        -DoutputFormat=json -DoutputName=sbom -DschemaVersion=1.6
+      # Derived from $QITS_MAVEN_REGISTRY_URL here rather than $QITS_NPM_REGISTRY_URL as in the step
+      # above: both are qits-net aliases of the same qits-artifacts deployment, and this step already
+      # holds the maven one.
+      sbom_base="${QITS_MAVEN_REGISTRY_URL%%/artifacts/*}/artifacts/sboms"
+      curl -fsS -X PUT -H 'Content-Type: application/vnd.cyclonedx+json' \
+        --data-binary @projects-daemon-protocol/target/sbom.json \
+        "$sbom_base/maven/eu.wohlben.qits:qits-projects-daemon-protocol/-/$version"

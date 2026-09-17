@@ -66,10 +66,16 @@
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
-            <!-- The wire contract. Vendored into qits-projects later; see AGENTS.md. -->
+            <!-- The wire contract, AND the released pin qits-projects consumes. The coordinate
+                 does not inherit this pom's groupId and is not the directory name: it is
+                 `eu.wohlben.qits:qits-projects-daemon-protocol`, the published spelling every
+                 artifact this platform releases uses. That module's own pom carries the reasoning;
+                 the short form is that it stopped being a vendored source module the day
+                 qits-projects started taking the `qits/project-agent` version from a pom line
+                 instead of a qits-configuration entry (ProjectAgentImage). -->
             <dependency>
-                <groupId>eu.wohlben</groupId>
-                <artifactId>projects-daemon-protocol</artifactId>
+                <groupId>eu.wohlben.qits</groupId>
+                <artifactId>qits-projects-daemon-protocol</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <!-- The command and coding-agent capability jars — RELEASED ARTIFACTS NOW, not

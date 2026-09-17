@@ -34,8 +34,12 @@
 
     <dependencies>
         <dependency>
-            <groupId>eu.wohlben</groupId>
-            <artifactId>projects-daemon-protocol</artifactId>
+            <!-- The wire contract. A published coordinate now (`eu.wohlben.qits:*`) rather than
+                 this reactor's inherited groupId, because qits-projects resolves this exact jar
+                 from the platform registry to learn which agent image to start. In-reactor here,
+                 released there; the version is managed in the root pom. -->
+            <groupId>eu.wohlben.qits</groupId>
+            <artifactId>qits-projects-daemon-protocol</artifactId>
         </dependency>
         <dependency>
             <!-- Launching and supervising processes in the checkout, served over ProjectsApi.
