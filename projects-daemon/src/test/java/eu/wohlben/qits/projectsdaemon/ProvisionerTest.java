@@ -18,6 +18,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Container-free coverage of the {@link Provisioner}'s pure decision helpers — the git base,
@@ -287,6 +288,180 @@ class ProvisionerTest {
     try (var paths = Files.walk(root)) {
       paths.sorted(Comparator.reverseOrder()).map(Path::toFile).forEach(java.io.File::delete);
     }
+  }
+
+  /**
+   * A superproject with one initialised submodule, cloned the way a first boot leaves {@code
+   * /workspace}: {@code origin} at {@code oldOrigin}, and the submodule's sibling url resolved from
+   * it and cached in {@code .git/config}. Clone-alone — two {@code git init}s, a scratch {@code
+   * GIT_CONFIG_GLOBAL}, {@code file://} urls, no network.
+   */
+  private static Path preservedCheckout(Path root, Path gitConfig, String oldOrigin)
+      throws Exception {
+    Files.writeString(
+        gitConfig,
+        "[user]\n\tname = t\n\temail = t@example.invalid\n"
+            + "[init]\n\tdefaultBranch = main\n"
+            + "[protocol]\n\tallow = always\n");
+    Path child = root.resolve("child");
+    Path superproject = root.resolve("super");
+    Files.createDirectories(child);
+    Files.createDirectories(superproject);
+
+    git(gitConfig, child, "init", "-q");
+    Files.writeString(child.resolve("a"), "a\n");
+    git(gitConfig, child, "add", "-A");
+    git(gitConfig, child, "commit", "-qm", "first");
+
+    git(gitConfig, superproject, "init", "-q");
+    Files.writeString(superproject.resolve("x"), "x\n");
+    git(gitConfig, superproject, "add", "-A");
+    git(gitConfig, superproject, "commit", "-qm", "root");
+    // The submodule is added while origin is the local sibling directory, so the relative url a
+    // wrapper actually commits resolves to something that exists and git caches that resolution in
+    // .git/config — the state a real preserved checkout is in. Only then does origin become the
+    // address this checkout was last cloned from.
+    git(gitConfig, superproject, "remote", "add", "origin", fileUrl(root.resolve("super")));
+    git(gitConfig, superproject, "config", "protocol.file.allow", "always");
+    git(gitConfig, superproject, "submodule", "add", "-q", "../child", "lib");
+    git(gitConfig, superproject, "add", "-A");
+    git(gitConfig, superproject, "commit", "-qm", "add submodule");
+    git(gitConfig, superproject, "remote", "set-url", "origin", oldOrigin);
+    return superproject;
+  }
+
+  /** A {@code file://} url with no trailing slash, so it compares byte for byte with git's own. */
+  private static String fileUrl(Path path) {
+    return "file://" + path;
+  }
+
+  /**
+   * {@code /workspace} outlives the container, so a checkout keeps the origin of its first clone
+   * while the address an agent container is handed moves underneath it. Nothing else would ever
+   * deliver that move to a project that already has a checkout.
+   */
+  @Test
+  void aPreservedCheckoutFollowsTheGitAddressWhenItMoves(@TempDir Path tmp) throws Exception {
+    Path gitConfig = tmp.resolve("gitconfig");
+    String old = "http://dev-qits-githost:8080/git/proj-1/qits-qits";
+    Path superproject = preservedCheckout(tmp, gitConfig, old);
+    Env env = env("proj-1", "qits-qits", GIT_BASE);
+
+    List<DaemonMessage> out = new ArrayList<>();
+    Provisioner.realignOrigin(superproject.toFile(), GIT_BASE, env, out::add);
+
+    assertEquals(
+        GIT_BASE + "/proj-1/qits-qits",
+        git(gitConfig, superproject, "config", "--get", "remote.origin.url").trim(),
+        "the checkout now fetches from the address this boot was handed");
+    assertTrue(
+        out.stream()
+            .anyMatch(
+                m ->
+                    m instanceof DaemonLog log
+                        && "INFO".equals(log.level())
+                        && log.message().contains(old)
+                        && log.message().contains(GIT_BASE + "/proj-1/qits-qits")),
+        "a checkout silently changing where it fetches from has to be findable in a log");
+  }
+
+  /**
+   * <b>The half that is easy to leave out.</b> {@code remote set-url} on the superproject does not
+   * touch the sibling urls git already resolved and cached in each submodule's {@code .git/config},
+   * so without {@code submodule sync --recursive} every submodule fetch goes on failing against the
+   * old host while the superproject looks repaired. Delete the sync call and this test goes red on
+   * both assertions.
+   */
+  @Test
+  void theSubmodulesCachedUrlsAreResyncedToTheNewOrigin(@TempDir Path tmp) throws Exception {
+    Path gitConfig = tmp.resolve("gitconfig");
+    Path superproject = preservedCheckout(tmp, gitConfig, fileUrl(tmp.resolve("super")));
+    Path lib = superproject.resolve("lib");
+    assertEquals(
+        fileUrl(tmp.resolve("child")),
+        git(gitConfig, superproject, "config", "--get", "submodule.lib.url").trim(),
+        "the fixture only proves anything while the cached sibling url names the OLD parent");
+
+    List<DaemonMessage> out = new ArrayList<>();
+    Provisioner.realignOrigin(
+        superproject.toFile(), GIT_BASE, env("proj-1", "qits-qits", GIT_BASE), out::add);
+
+    assertEquals(
+        GIT_BASE + "/proj-1/child",
+        git(gitConfig, superproject, "config", "--get", "submodule.lib.url").trim(),
+        "the superproject's cached sibling url was re-resolved against the new origin");
+    assertEquals(
+        GIT_BASE + "/proj-1/child",
+        git(gitConfig, lib, "config", "--get", "remote.origin.url").trim(),
+        "and so was the submodule's own remote — the one its fetches actually use");
+  }
+
+  /** An origin that already names this boot's address is not touched, and says nothing. */
+  @Test
+  void anOriginThatAlreadyMatchesIsLeftCompletelyAlone(@TempDir Path tmp) throws Exception {
+    Path gitConfig = tmp.resolve("gitconfig");
+    String current = GIT_BASE + "/proj-1/qits-qits";
+    Path superproject = preservedCheckout(tmp, gitConfig, current);
+    String cachedSibling =
+        git(gitConfig, superproject, "config", "--get", "submodule.lib.url").trim();
+
+    List<DaemonMessage> out = new ArrayList<>();
+    Provisioner.realignOrigin(
+        superproject.toFile(), GIT_BASE, env("proj-1", "qits-qits", GIT_BASE), out::add);
+
+    assertTrue(out.isEmpty(), "no set-url, no sync, no log — nothing ran at all");
+    assertEquals(
+        current, git(gitConfig, superproject, "config", "--get", "remote.origin.url").trim());
+    assertEquals(
+        cachedSibling,
+        git(gitConfig, superproject, "config", "--get", "submodule.lib.url").trim());
+  }
+
+  /**
+   * Git serves the same repository with or without a trailing slash and with or without {@code
+   * .git}. Treating either spelling as a move would rewrite the config on every single boot and log
+   * a change that never happened.
+   */
+  @Test
+  void aTrailingSlashOrGitSuffixIsNotAMove(@TempDir Path tmp) throws Exception {
+    assertTrue(Provisioner.sameRemote(GIT_BASE + "/p/r", GIT_BASE + "/p/r/"));
+    assertTrue(Provisioner.sameRemote(GIT_BASE + "/p/r.git", GIT_BASE + "/p/r"));
+    assertTrue(Provisioner.sameRemote(GIT_BASE + "/p/r.git/", GIT_BASE + "/p/r"));
+    assertFalse(Provisioner.sameRemote("http://old:8080/git/p/r", GIT_BASE + "/p/r"));
+
+    Path gitConfig = tmp.resolve("gitconfig");
+    String suffixed = GIT_BASE + "/proj-1/qits-qits.git";
+    Path superproject = preservedCheckout(tmp, gitConfig, suffixed);
+
+    List<DaemonMessage> out = new ArrayList<>();
+    Provisioner.realignOrigin(
+        superproject.toFile(), GIT_BASE, env("proj-1", "qits-qits", GIT_BASE), out::add);
+
+    assertTrue(out.isEmpty(), "same address, different spelling — nothing to do");
+    assertEquals(
+        suffixed, git(gitConfig, superproject, "config", "--get", "remote.origin.url").trim());
+  }
+
+  /**
+   * A checkout whose origin cannot be rewritten is still a checkout, and may hold unpushed commits.
+   * Failing the boot over an address would cost the agent its container; the {@code WARN} is what
+   * makes the stale origin findable instead.
+   */
+  @Test
+  void aFailedRewriteWarnsAndLetsTheProvisionContinue(@TempDir Path tmp) {
+    List<DaemonMessage> out = new ArrayList<>();
+    // Not a git repository, so `remote get-url origin` cannot answer.
+    Provisioner.realignOrigin(
+        tmp.toFile(), GIT_BASE, env("proj-1", "qits-qits", GIT_BASE), out::add);
+
+    assertTrue(
+        out.stream()
+            .anyMatch(m -> m instanceof DaemonLog log && "WARN".equals(log.level())),
+        "the failure is announced");
+    assertTrue(
+        out.stream().noneMatch(m -> m instanceof ProvisionFailed),
+        "and it is not terminal: realignOrigin returns, so the caller's next statements —"
+            + " the submodule walk and Provisioned — run unconditionally");
   }
 
   @Test
