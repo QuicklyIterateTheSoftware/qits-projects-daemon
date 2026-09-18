@@ -207,6 +207,19 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.projects-daemon.image-version")
   Optional<String> imageVersion;
 
+  /**
+   * Whether this container holds {@code /workspace} at what the repositories released, by
+   * supervising {@code qits checkout-daemon} for the container's life (see {@link
+   * CheckoutFollower}).
+   *
+   * <p>On by default, because a project agent reading a checkout that drifted from the releases is
+   * the failure this exists to remove. The switch is here for the container you want to pin by hand
+   * — a reproduction, a bisect — and it spawns nothing and says so once rather than starting and
+   * idling, so "off" is legible in the log rather than inferred from silence.
+   */
+  @ConfigProperty(name = "qits.projects-daemon.checkout-follow", defaultValue = "true")
+  boolean checkoutFollow;
+
   /** Whether launches wire the turn-boundary activity hooks; the lineage hook is unconditional. */
   @ConfigProperty(name = "qits.agent.activity-tracking-enabled", defaultValue = "true")
   boolean agentActivityTrackingEnabled;
@@ -285,9 +298,30 @@ public class ControlSocket {
   /**
    * Whether the boot self-provision produced a usable checkout. The API binds either way (see {@link
    * #wireCapabilities}); this is what keeps the degraded surface from claiming a commit it does not
-   * have.
+   * have, and what {@link #followCheckout()} refuses to start a follower without.
+   *
+   * <p>Package-private so a test can put the daemon in either state without running a clone.
    */
-  private volatile boolean provisioned;
+  volatile boolean provisioned;
+
+  /**
+   * The supervised {@code qits checkout-daemon} child, once the boot provision produced a checkout
+   * for it to hold. Null until then, and on a container whose provision failed it stays null for
+   * the process lifetime. Package-private for the same reason {@link #provisioned} is.
+   */
+  volatile CheckoutFollower checkoutFollower;
+
+  /**
+   * The follower's restart ladder and give-up rule, as this daemon's policy rather than as
+   * configuration. They are constants and not keys on purpose: a knob here is a way to make the
+   * give-up rule invisible, and the only caller that needs other values is a test driving the
+   * ladder in milliseconds.
+   */
+  private static final long CHECKOUT_FOLLOW_BACKOFF_INITIAL_MS = 1_000;
+
+  private static final long CHECKOUT_FOLLOW_BACKOFF_MAX_MS = 30_000;
+  private static final long CHECKOUT_FOLLOW_RUN_RESET_MS = 60_000;
+  private static final int CHECKOUT_FOLLOW_MAX_RUNS = 5;
 
   /** Where the daemon runs the self-clone and every command (image {@code WORKDIR}). */
   private static final File WORKSPACE_DIR = new File("/workspace");
@@ -377,7 +411,48 @@ public class ControlSocket {
                   projectId, repoName, gitBaseConfig.orElse(""), gitAuthorization);
           provisioned = Provisioner.provision(env, this::send);
           wireCapabilities();
+          // After the API is wired, never before: the loopback surface must not wait on a
+          // subprocess, and a container whose clone failed has no checkout to hold.
+          followCheckout();
         });
+  }
+
+  /**
+   * Start the {@code qits checkout-daemon} child that holds {@code /workspace} at what the
+   * repositories released — but only when the boot provision produced a checkout for it to hold.
+   *
+   * <p>Never throws. This runs on the boot worker of PID 1's child, so a follower that cannot be
+   * constructed costs the container a log line and nothing else; the alternative is an escaping
+   * exception on the one path that also wired the agent surface.
+   *
+   * <p>Package-private so a test can drive both sides of the {@link #provisioned} guard without
+   * running a clone.
+   */
+  void followCheckout() {
+    if (!provisioned) {
+      // Nothing to hold. A follower here would fail its first fetch against a directory that is
+      // not a checkout, once a second, for the life of the container.
+      return;
+    }
+    try {
+      CheckoutFollower follower =
+          new CheckoutFollower(
+              checkoutFollow,
+              CheckoutFollower.DEFAULT_BINARY,
+              gitBaseConfig.orElse(""),
+              authTokenUrl.orElse(""),
+              gitAuthAudience.orElse(""),
+              CHECKOUT_FOLLOW_BACKOFF_INITIAL_MS,
+              CHECKOUT_FOLLOW_BACKOFF_MAX_MS,
+              CHECKOUT_FOLLOW_RUN_RESET_MS,
+              CHECKOUT_FOLLOW_MAX_RUNS,
+              termGraceMs,
+              this::send);
+      checkoutFollower = follower;
+      follower.start();
+    } catch (RuntimeException e) {
+      LOG.warnf("The checkout follower did not start: %s", e.getMessage());
+    }
   }
 
   /**
@@ -786,6 +861,12 @@ public class ControlSocket {
 
   @PreDestroy
   void stop() {
+    // First, because it owns a child process: stopping supervision before the worker pool goes
+    // means no restart can be scheduled into a half-torn-down daemon.
+    CheckoutFollower follower = checkoutFollower;
+    if (follower != null) {
+      follower.stop();
+    }
     HookWebhook h = hooks;
     if (h != null) {
       h.close();

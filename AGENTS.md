@@ -41,6 +41,8 @@ library declares:
     DaemonAgentDefaults     the harness default, activity tracking, the mounted document, the facts
     DaemonMcpEndpoints      where that server lives
     AgentConfigurationBoot  materializing the per-surface configuration document at boot
+    CheckoutFollower        supervising `qits checkout-daemon`, which holds /workspace at what the
+                            repositories released; started after the boot provision and the API
 
 Both library modules are framework-free — no CDI, no JAX-RS, no Jackson — so they cannot read
 configuration. `ControlSocket` is the single reader and hands every setting down as a constructor

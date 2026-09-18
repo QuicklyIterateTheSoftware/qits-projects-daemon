@@ -42,8 +42,9 @@ import java.util.function.Consumer;
  *
  * <p>An existing checkout (a reconnect after a restart) is never re-cloned: it may hold unpushed
  * commits. The submodule walk still re-runs, because a prior boot may have died between the root
- * clone and materialization, and {@code submodule update --init} is a no-op on submodules already
- * present.
+ * clone and materialization, and {@code submodule update --init --checkout} is a no-op on a
+ * submodule already sitting at its gitlink. That second boot is where {@code --checkout} earns its
+ * place — see {@link #materializeSubmodules}.
  *
  * <p><b>The git base must be injected.</b> {@code qits.projects-daemon.git-base} names the git host
  * outright ({@code QITS_PROJECTS_DAEMON_GIT_BASE}), and qits-projects sets it on every container it
@@ -115,7 +116,7 @@ public final class Provisioner {
             new DaemonLog(
                 "INFO",
                 "/workspace already checked out — skipping root clone, re-checking submodules."));
-        materializeSubmodules(gitBase, env, ".", 0, emit);
+        materializeSubmodules(gitBase, env, WORKSPACE_DIR, ".", 0, emit);
         emit.accept(new Provisioned(env.projectId(), head()));
         return true;
       }
@@ -132,7 +133,7 @@ public final class Provisioner {
                 env.projectId(), "git clone exited " + cloneExit + " (" + rootUrl + ")"));
         return false;
       }
-        materializeSubmodules(gitBase, env, ".", 0, emit);
+      materializeSubmodules(gitBase, env, WORKSPACE_DIR, ".", 0, emit);
       emit.accept(new Provisioned(env.projectId(), head()));
       return true;
     } catch (RuntimeException e) {
@@ -227,9 +228,12 @@ public final class Provisioner {
    * unrelated content. Severity is bounded by the project model — a project is one maintainer's
    * curated repository set, so this is a naming mistake in their own project, not an outside
    * threat.
+   *
+   * <p>{@code root} is the checkout every git call runs in — {@link #WORKSPACE_DIR} in the daemon,
+   * a temp directory in the test that proves the {@code --checkout} flag below.
    */
-  private static void materializeSubmodules(
-      String gitBase, Env env, String rel, int depth, Consumer<DaemonMessage> emit) {
+  static void materializeSubmodules(
+      String gitBase, Env env, File root, String rel, int depth, Consumer<DaemonMessage> emit) {
     if (depth >= MAX_SUBMODULE_DEPTH) {
       return;
     }
@@ -237,14 +241,15 @@ public final class Provisioner {
     Captured listed =
         capture(
             List.of(
-                "git", "config", "--file", gitmodules, "--get-regexp", "^submodule\\..*\\.path$"));
+                "git", "config", "--file", gitmodules, "--get-regexp", "^submodule\\..*\\.path$"),
+            root);
     if (listed.exitCode() != 0 || listed.stdout().isBlank()) {
       return;
     }
     List<Submodule> present = new ArrayList<>();
     for (Submodule sub : parseSubmodules(listed.stdout())) {
       // The gitlink may be absent on this branch (parsed from another branch's .gitmodules).
-      if (capture(List.of("git", "-C", rel, "ls-files", "--error-unmatch", "--", sub.path()))
+      if (capture(List.of("git", "-C", rel, "ls-files", "--error-unmatch", "--", sub.path()), root)
               .exitCode()
           != 0) {
         continue;
@@ -252,7 +257,13 @@ public final class Provisioner {
       Captured committedUrl =
           capture(
               List.of(
-                  "git", "config", "--file", gitmodules, "--get", "submodule." + sub.name() + ".url"));
+                  "git",
+                  "config",
+                  "--file",
+                  gitmodules,
+                  "--get",
+                  "submodule." + sub.name() + ".url"),
+              root);
       String url = committedUrl.exitCode() == 0 ? committedUrl.stdout().trim() : "";
       boolean relative = url.isEmpty() || url.startsWith("./") || url.startsWith("../");
       // A relative url resolves natively against the project-scoped origin; only an absolute url
@@ -267,12 +278,24 @@ public final class Provisioner {
                 "submodule." + sub.name() + ".url",
                 siblingUrl(gitBase, env, url)),
             Map.of(),
+            root,
             emit);
       }
+      // --checkout, and it is not redundant with --init. Every .gitmodules entry of the wrapper
+      // this serves carries `update = merge`, and --init copies that into the checkout's config —
+      // so once CheckoutFollower detaches the root at a release tag, a later boot's walk would
+      // MERGE the newly recorded gitlink into a detached submodule instead of checking it out, and
+      // the follower never repairs it because the CLI's Checkout.hold compares only the root's
+      // HEAD. The flag pins the mode to checkout regardless of what the entry asked for. On a first
+      // clone it changes nothing: git forces checkout mode for a submodule it has just cloned,
+      // which is exactly why a naive fixture passes without it.
       int update =
           runStreaming(
-              List.of("git", "-C", rel, "submodule", "update", "--init", "--", sub.path()),
+              List.of(
+                  "git", "-C", rel, "submodule", "update", "--init", "--checkout", "--",
+                  sub.path()),
               gitEnvironment(env),
+              root,
               emit);
       if (update != 0) {
         emit.accept(
@@ -290,7 +313,7 @@ public final class Provisioner {
       present.add(sub);
     }
     for (Submodule sub : present) {
-      materializeSubmodules(gitBase, env, childRel(rel, sub.path()), depth + 1, emit);
+      materializeSubmodules(gitBase, env, root, childRel(rel, sub.path()), depth + 1, emit);
     }
   }
 
@@ -359,15 +382,23 @@ public final class Provisioner {
    * CommandExit} — a provision is not a command round-trip.
    */
   static int runStreaming(List<String> argv, Consumer<DaemonMessage> emit) {
-    return runStreaming(argv, Map.of(), emit);
+    return runStreaming(argv, Map.of(), WORKSPACE_DIR, emit);
   }
 
   static int runStreaming(
       List<String> argv, Map<String, String> environment, Consumer<DaemonMessage> emit) {
+    return runStreaming(argv, environment, WORKSPACE_DIR, emit);
+  }
+
+  static int runStreaming(
+      List<String> argv,
+      Map<String, String> environment,
+      File workingDir,
+      Consumer<DaemonMessage> emit) {
     ProcessBuilder builder = new ProcessBuilder(argv);
     builder.environment().putAll(environment);
-    if (WORKSPACE_DIR.isDirectory()) {
-      builder.directory(WORKSPACE_DIR);
+    if (workingDir != null && workingDir.isDirectory()) {
+      builder.directory(workingDir);
     }
     Process process;
     try {
@@ -430,13 +461,17 @@ public final class Provisioner {
 
   private record Captured(int exitCode, String stdout) {}
 
-  /** Run a short git read in {@code /workspace}, returning its exit and stdout ("" on failure). */
+  /** Run a short git read in the checkout, returning its exit and stdout ("" on failure). */
   private static Captured capture(List<String> argv) {
+    return capture(argv, WORKSPACE_DIR);
+  }
+
+  private static Captured capture(List<String> argv, File workingDir) {
     try {
       ProcessBuilder builder =
           new ProcessBuilder(argv).redirectError(ProcessBuilder.Redirect.DISCARD);
-      if (WORKSPACE_DIR.isDirectory()) {
-        builder.directory(WORKSPACE_DIR);
+      if (workingDir != null && workingDir.isDirectory()) {
+        builder.directory(workingDir);
       }
       Process process = builder.start();
       byte[] out = process.getInputStream().readAllBytes();

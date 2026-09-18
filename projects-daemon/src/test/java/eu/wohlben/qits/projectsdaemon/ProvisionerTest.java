@@ -10,7 +10,11 @@ import eu.wohlben.qits.projectsdaemon.protocol.DaemonLog;
 import eu.wohlben.qits.projectsdaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.projectsdaemon.protocol.ProvisionFailed;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -170,6 +174,119 @@ class ProvisionerTest {
     assertEquals("foo", Provisioner.basename("git@host:o/foo.git"));
     assertEquals("foo", Provisioner.basename("../foo.git"));
     assertEquals("foo", Provisioner.basename("foo"));
+  }
+
+  /**
+   * The submodule walk must pin the update to <b>checkout</b> mode, and a naive fixture cannot see
+   * it.
+   *
+   * <p>Every {@code .gitmodules} entry of the wrapper this daemon serves carries {@code update =
+   * merge}, and {@code --init} copies that into the checkout's config. Once {@link
+   * CheckoutFollower} detaches the root at a release tag, a later boot's walk would then
+   * <em>merge</em> the newly recorded gitlink into a detached submodule instead of checking it out
+   * — and nothing repairs it, because the CLI's {@code Checkout.hold} compares only the root's
+   * {@code HEAD}.
+   *
+   * <p><b>The trap the CLI ticket recorded:</b> git forces checkout mode for a submodule it has
+   * just cloned, so an {@code --init} against a fresh fixture passes with or without the flag. This
+   * fixture therefore leaves the submodule <em>already initialised and sitting on a local
+   * branch</em> before the walk runs, which is the only state in which {@code merge} and {@code
+   * checkout} diverge. Drop {@code --checkout} from the argv and the submodule ends on {@code
+   * main} rather than detached, and this test goes red.
+   *
+   * <p>Clone-alone: two {@code git init}s in a temp directory, a scratch {@code GIT_CONFIG_GLOBAL},
+   * a {@code file://} origin. No network, no docker, no platform.
+   */
+  @Test
+  void theSubmoduleUpdateChecksOutRatherThanMergingIntoADetachedSubmodule() throws Exception {
+    Path root = Files.createTempDirectory("provisioner-submodule");
+    try {
+      Path gitConfig = root.resolve("gitconfig");
+      Files.writeString(
+          gitConfig,
+          "[user]\n\tname = t\n\temail = t@example.invalid\n"
+              + "[init]\n\tdefaultBranch = main\n"
+              + "[protocol]\n\tallow = always\n");
+      Path child = root.resolve("child");
+      Path superproject = root.resolve("super");
+      Files.createDirectories(child);
+      Files.createDirectories(superproject);
+
+      git(gitConfig, child, "init", "-q");
+      Files.writeString(child.resolve("a"), "a\n");
+      git(gitConfig, child, "add", "-A");
+      git(gitConfig, child, "commit", "-qm", "first");
+      String first = git(gitConfig, child, "rev-parse", "HEAD").trim();
+      Files.writeString(child.resolve("b"), "b\n");
+      git(gitConfig, child, "add", "-A");
+      git(gitConfig, child, "commit", "-qm", "second");
+      String released = git(gitConfig, child, "rev-parse", "HEAD").trim();
+
+      git(gitConfig, superproject, "init", "-q");
+      Files.writeString(superproject.resolve("x"), "x\n");
+      git(gitConfig, superproject, "add", "-A");
+      git(gitConfig, superproject, "commit", "-qm", "root");
+      // A relative submodule url, the shape the wrapper actually commits — so the Provisioner
+      // leaves it alone rather than redirecting it to a sibling that does not exist here.
+      git(gitConfig, superproject, "remote", "add", "origin", superproject.toUri().toString());
+      git(gitConfig, superproject, "submodule", "add", "-q", "../child", "lib");
+      git(gitConfig, superproject, "config", "-f", ".gitmodules", "submodule.lib.update", "merge");
+      git(gitConfig, superproject, "add", "-A");
+      git(gitConfig, superproject, "commit", "-qm", "add submodule");
+      // The Provisioner's own git calls inherit the JVM's environment, not this scratch config.
+      git(gitConfig, superproject, "config", "protocol.file.allow", "always");
+
+      // The state a second boot finds: the submodule initialised, on a local branch, one commit
+      // behind the gitlink the superproject records.
+      Path lib = superproject.resolve("lib");
+      git(gitConfig, lib, "checkout", "-q", "-B", "main", first);
+      assertEquals(
+          "refs/heads/main",
+          git(gitConfig, lib, "symbolic-ref", "-q", "HEAD").trim(),
+          "the fixture only proves anything while the submodule is attached to a branch");
+
+      List<DaemonMessage> out = new ArrayList<>();
+      Provisioner.materializeSubmodules(
+          GIT_BASE, env("proj-1", "qits-qits", GIT_BASE), superproject.toFile(), ".", 0, out::add);
+
+      assertEquals(
+          released,
+          git(gitConfig, lib, "rev-parse", "HEAD").trim(),
+          "the submodule moved to the gitlink the superproject records");
+      assertEquals(
+          "",
+          git(gitConfig, lib, "symbolic-ref", "-q", "HEAD"),
+          "and it is DETACHED there — `update = merge` would have fast-forwarded main instead,"
+              + " leaving a branch the next release quietly merges into");
+    } finally {
+      deleteRecursively(root);
+    }
+  }
+
+  /** Run git with an isolated global config, failing the test on a non-zero exit. */
+  private static String git(Path globalConfig, Path dir, String... args) throws Exception {
+    List<String> argv = new ArrayList<>();
+    argv.add("git");
+    argv.addAll(List.of(args));
+    ProcessBuilder builder = new ProcessBuilder(argv).directory(dir.toFile());
+    builder.environment().put("GIT_CONFIG_GLOBAL", globalConfig.toString());
+    builder.environment().put("GIT_CONFIG_SYSTEM", "/dev/null");
+    builder.redirectErrorStream(true);
+    Process process = builder.start();
+    String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+    int exit = process.waitFor();
+    // `symbolic-ref -q` answers "detached" with exit 1 and no output, which is an answer here.
+    if (exit != 0 && !"symbolic-ref".equals(args[0])) {
+      throw new IllegalStateException(
+          "git " + String.join(" ", args) + " exited " + exit + ": " + output);
+    }
+    return output;
+  }
+
+  private static void deleteRecursively(Path root) throws Exception {
+    try (var paths = Files.walk(root)) {
+      paths.sorted(Comparator.reverseOrder()).map(Path::toFile).forEach(java.io.File::delete);
+    }
   }
 
   @Test
