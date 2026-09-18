@@ -44,7 +44,10 @@ import java.util.function.Consumer;
  * commits. The submodule walk still re-runs, because a prior boot may have died between the root
  * clone and materialization, and {@code submodule update --init --checkout} is a no-op on a
  * submodule already sitting at its gitlink. That second boot is where {@code --checkout} earns its
- * place — see {@link #materializeSubmodules}.
+ * place — see {@link #materializeSubmodules}. What that boot does re-decide is <em>where</em> the
+ * checkout fetches from: {@code /workspace} outlives its container and keeps the origin of its
+ * first clone, so a moved git address would otherwise never reach a project that already had one —
+ * see {@link #realignOrigin}.
  *
  * <p><b>The git base must be injected.</b> {@code qits.projects-daemon.git-base} names the git host
  * outright ({@code QITS_PROJECTS_DAEMON_GIT_BASE}), and qits-projects sets it on every container it
@@ -116,6 +119,7 @@ public final class Provisioner {
             new DaemonLog(
                 "INFO",
                 "/workspace already checked out — skipping root clone, re-checking submodules."));
+        realignOrigin(WORKSPACE_DIR, gitBase, env, emit);
         materializeSubmodules(gitBase, env, WORKSPACE_DIR, ".", 0, emit);
         emit.accept(new Provisioned(env.projectId(), head()));
         return true;
@@ -140,6 +144,109 @@ public final class Provisioner {
       emit.accept(new ProvisionFailed(env.projectId(), "self-provision error: " + e.getMessage()));
       return false;
     }
+  }
+
+  /**
+   * Point a preserved checkout's {@code origin} at the address <em>this</em> boot would clone from,
+   * when the two have diverged.
+   *
+   * <p>{@code /workspace} is a volume that outlives its container, so a checkout keeps the {@code
+   * remote.origin.url} of its first clone for ever while the address the platform hands an agent
+   * container moves underneath it. That is not hypothetical: the git address moved from the service
+   * alias to the internal one because the image's credential helper emits HTTP Basic, which only
+   * the internal alias' oauth2 transport accepts. Without this every project that already had a
+   * checkout would go on fetching — and failing to authenticate — against the old address,
+   * including {@code CheckoutFollower}'s child, which fetches from the checkout's own origin and
+   * never from the injected base.
+   *
+   * <p><b>{@code submodule sync} is the load-bearing half.</b> Changing the superproject's origin
+   * does not touch the sibling urls git already resolved and cached in each submodule's {@code
+   * .git/config}: those keep the old host and every submodule fetch keeps failing, with a
+   * superproject that now looks correct. The pair is qits-workspace-daemon's {@code
+   * alignExistingCheckoutOrigin}, for the same reason.
+   *
+   * <p>A trailing slash or a {@code .git} suffix is not a difference — the same address written two
+   * ways — and rewriting on one would replace the url on every boot and log a move that never
+   * happened.
+   *
+   * <p>Never fails the provision. A checkout whose origin could not be rewritten is still a usable
+   * checkout with unpushed commits in it, and refusing to boot over it would cost the agent its
+   * container to fix an address; the {@code WARN} is what makes the stale origin findable when the
+   * fetches start failing.
+   */
+  static void realignOrigin(File root, String gitBase, Env env, Consumer<DaemonMessage> emit) {
+    String wanted = rootUrl(gitBase, env);
+    Captured current =
+        capture(List.of("git", "-C", root.getPath(), "remote", "get-url", "origin"), root);
+    if (current.exitCode() != 0) {
+      emit.accept(
+          new DaemonLog(
+              "WARN",
+              "could not read the existing checkout's origin (git remote get-url exited "
+                  + current.exitCode()
+                  + ") — leaving it pointing wherever it was cloned from"));
+      return;
+    }
+    String existing = current.stdout().trim();
+    if (sameRemote(existing, wanted)) {
+      return;
+    }
+    emit.accept(
+        new DaemonLog(
+            "INFO",
+            "existing checkout's origin moved: "
+                + existing
+                + " -> "
+                + wanted
+                + " (re-syncing submodule urls)"));
+    int setUrl =
+        runStreaming(
+            List.of("git", "-C", root.getPath(), "remote", "set-url", "origin", wanted),
+            Map.of(),
+            root,
+            emit);
+    if (setUrl != 0) {
+      emit.accept(
+          new DaemonLog(
+              "WARN",
+              "git remote set-url origin exited " + setUrl + " — origin still " + existing));
+      return;
+    }
+    int sync =
+        runStreaming(
+            List.of("git", "-C", root.getPath(), "submodule", "sync", "--recursive"),
+            Map.of(),
+            root,
+            emit);
+    if (sync != 0) {
+      emit.accept(
+          new DaemonLog(
+              "WARN",
+              "git submodule sync --recursive exited "
+                  + sync
+                  + " — the submodules' cached urls still name "
+                  + existing));
+    }
+  }
+
+  /**
+   * Whether two remote urls address the same repository. Git accepts the same address with or
+   * without a trailing slash and with or without the {@code .git} suffix, and qits-githost serves
+   * both, so neither spelling is a move worth rewriting the config for.
+   */
+  static boolean sameRemote(String a, String b) {
+    return normalizeRemote(a).equals(normalizeRemote(b));
+  }
+
+  private static String normalizeRemote(String url) {
+    String out = url == null ? "" : url.trim();
+    if (out.length() > 1 && out.endsWith("/")) {
+      out = out.substring(0, out.length() - 1);
+    }
+    if (out.endsWith(".git")) {
+      out = out.substring(0, out.length() - ".git".length());
+    }
+    return out;
   }
 
   /**
