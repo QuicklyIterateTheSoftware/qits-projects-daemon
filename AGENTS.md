@@ -222,13 +222,14 @@ A launch is steered and addressed separately, and the two are different values o
 `AgentLaunchRequest`. Folding them together would mean a surface could not be narrowed to a
 repository, or that narrowing to a repository quietly changed what the agent was for.
 
-    scope     AgentMcpScope   PROJECT | REPOSITORY               how narrow the one MCP url is
-    surface   AgentSurface    project.epics | project.tickets    where in the product it started
+    scope     AgentMcpScope   PROJECT | REPOSITORY   how narrow the one MCP url is
+    surface   AgentSurface    project.work           where in the product it started
 
 **The surface replaced the desk.** `AgentDesk` was a two-valued enum with its prompt inlined,
 because there was nowhere to put a prompt; the library's `AgentSurface` is an open vocabulary of
-eight keys, `EPICS` is `project.epics` and `TICKETS` is `project.tickets`, and both render byte for
-byte what the enum rendered. This container serves **two** of the eight.
+seven keys, and `PROJECT_WORK` is `project.work` — the one project desk, the merged epics+tickets
+front desk `AgentDesk`'s two values folded into once the estate turned over onto it (`project.epics`
+and `project.tickets` retired, task qits-404). This container serves **one** of the seven.
 
 - **On the way in**, `AgentJson.launchRequest` reads `surface` off the `POST /agents` body, and it
   is **required**: an *unknown* one is a 400 at the door (`AgentSurface.of`) and a *missing* one is

@@ -276,11 +276,11 @@ public class ControlSocket {
   private final AgentSessionStore agentSessionStore = new AgentSessionStore();
 
   /**
-   * What this container was created to run its two surfaces ({@code project.epics}, {@code
-   * project.tickets}) as. Read <b>once</b>, at boot, in {@link #start()} — a container keeps what it
-   * was born with, so re-reading it per launch would be file IO for a value that cannot change.
-   * Defaults to the library's shipped constants, which is what a container created before the
-   * configuration epic shipped runs on.
+   * What this container was created to run its one surface ({@code project.work}) as. Read
+   * <b>once</b>, at boot, in {@link #start()} — a container keeps what it was born with, so
+   * re-reading it per launch would be file IO for a value that cannot change. Defaults to the
+   * library's shipped constants, which is what a container created before the configuration epic
+   * shipped runs on.
    */
   private volatile AgentSurfaceConfigurations surfaceConfigurations =
       AgentSurfaceConfigurations.shipped();

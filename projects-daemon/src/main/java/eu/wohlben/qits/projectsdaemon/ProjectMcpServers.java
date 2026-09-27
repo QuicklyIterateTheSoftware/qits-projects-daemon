@@ -43,7 +43,7 @@ final class ProjectMcpServers implements AgentMcpServers {
    * mcp__<server>__<tool>}.
    *
    * <p>The server carries three surfaces, so this list does too: the repository tools, the epic ones
-   * a refinement session drafts through, and the ticket ones the tickets desk triages through.
+   * a refinement session drafts through, and the ticket ones the project desk triages through.
    * {@code list_epics} and {@code get_epic} are the survey the agent has to make before it can tell
    * "extend this draft" from "propose a new epic", and pre-approving them is the same call as
    * pre-approving {@code listRepositories}. {@code list_tickets} and {@code get_ticket} are the

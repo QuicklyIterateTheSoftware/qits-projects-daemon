@@ -32,9 +32,9 @@ class AgentJsonTest {
   void aLaunchNamesItsSurface() {
     AgentLaunchRequest request =
         AgentJson.launchRequest(
-            new JsonObject().put("scope", "PROJECT").put("surface", "project.tickets"));
+            new JsonObject().put("scope", "PROJECT").put("surface", "project.work"));
 
-    assertEquals(AgentSurface.PROJECT_TICKETS, request.surface());
+    assertEquals(AgentSurface.PROJECT_WORK, request.surface());
     assertEquals(AgentMcpScope.PROJECT, request.scope());
   }
 
@@ -78,12 +78,12 @@ class AgentJsonTest {
             .surface(),
         "an unread field, not a second steering key");
     assertEquals(
-        AgentSurface.PROJECT_TICKETS,
+        AgentSurface.PROJECT_WORK,
         AgentJson.launchRequest(
                 new JsonObject()
                     .put("scope", "PROJECT")
                     .put("desk", "EPICS")
-                    .put("surface", "project.tickets"))
+                    .put("surface", "project.work"))
             .surface(),
         "and it cannot contradict the surface, because nothing looks at it");
   }

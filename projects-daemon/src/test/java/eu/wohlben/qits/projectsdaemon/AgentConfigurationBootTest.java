@@ -33,7 +33,7 @@ class AgentConfigurationBootTest {
         "surfaces": [
           {
             "configuration": {
-              "surface": "project.tickets",
+              "surface": "project.work",
               "harness": "KIMI",
               "model": "kimi-k2",
               "effort": "",
@@ -71,16 +71,17 @@ class AgentConfigurationBootTest {
     assertEquals(DOCUMENT.trim(), Files.readString(target).trim());
     assertEquals(
         AgentType.KIMI,
-        configurations
-            .resolve(AgentSurface.PROJECT_TICKETS, AgentType.CLAUDE, true)
-            .harness(),
+        configurations.resolve(AgentSurface.PROJECT_WORK, AgentType.CLAUDE, true).harness(),
         "and the surface it configures runs as it says, not as the daemon's default");
     assertEquals(
         AgentPermissionMode.SKIP_PERMISSIONS,
-        configurations.resolve(AgentSurface.PROJECT_TICKETS, AgentType.CLAUDE, true).permissionMode());
+        configurations.resolve(AgentSurface.PROJECT_WORK, AgentType.CLAUDE, true).permissionMode());
     assertEquals(
         AgentType.CLAUDE,
-        configurations.resolve(AgentSurface.PROJECT_EPICS, AgentType.CLAUDE, true).harness(),
+        // Not this container's own surface — any surface the document does not mention resolves the
+        // same way, on the shipped default. project.work is the only surface this daemon launches,
+        // so a surface belonging to the workspace daemon proves the "unmentioned" case instead.
+        configurations.resolve(AgentSurface.EPIC_CHAT, AgentType.CLAUDE, true).harness(),
         "a surface the document does not mention still launches, on the shipped default");
   }
 

@@ -40,16 +40,16 @@ class CommandJsonTest {
                 "main",
                 "abc1234def",
                 null,
-                "Claude Code (tickets desk)",
+                "Claude Code (project desk)",
                 "claude --print",
                 false,
                 "CLAUDE",
-                "project.tickets",
+                "project.work",
                 Instant.parse("2026-09-09T10:00:00Z")),
             "proj-7",
             "qits-qits");
 
-    assertEquals("project.tickets", body.getString("agentSurface"));
+    assertEquals("project.work", body.getString("agentSurface"));
     assertEquals("abc1234", body.getString("shortCommitHash"));
   }
 
@@ -90,13 +90,13 @@ class CommandJsonTest {
     JsonObject record = serve(RECORD).getJsonObject("agentLaunchRecord");
 
     // Literal keys and literal values, like every other field on this wire.
-    assertEquals("project.tickets", record.getString("surface"));
+    assertEquals("project.work", record.getString("surface"));
     assertEquals("CLAUDE", record.getString("harness"));
     assertEquals("opus", record.getString("model"));
     assertEquals("high", record.getString("effort"));
     assertEquals("SKIP_PERMISSIONS", record.getString("permissionMode"));
     assertEquals(true, record.getBoolean("remoteControl"));
-    assertEquals("project.tickets on main", record.getString("remoteControlName"));
+    assertEquals("project.work on main", record.getString("remoteControlName"));
     assertEquals(true, record.getBoolean("activityTracking"));
     assertEquals(true, record.getBoolean("configured"));
     assertEquals(new JsonArray().add("note"), record.getJsonArray("notes"));
@@ -156,7 +156,7 @@ class CommandJsonTest {
             "claude --print",
             false,
             "CLAUDE",
-            "project.tickets",
+            "project.work",
             record,
             Instant.parse("2026-09-09T10:00:00Z")),
         "proj-7",
@@ -169,13 +169,13 @@ class CommandJsonTest {
    */
   private static final String RECORD =
       new AgentLaunchRecord(
-              "project.tickets",
+              "project.work",
               AgentType.CLAUDE,
               "opus",
               "high",
               AgentPermissionMode.SKIP_PERMISSIONS,
               true,
-              "project.tickets on main",
+              "project.work on main",
               true,
               List.of(new AgentLaunchRecord.AttachedServer("repository", true)),
               List.of("stripe"),
