@@ -9,6 +9,7 @@ import eu.wohlben.qits.projectsdaemon.protocol.DaemonProtocol.AgentState;
 import io.vertx.core.json.JsonObject;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -20,6 +21,16 @@ class HookWebhookTest {
 
   private final List<DaemonMessage> sent = new ArrayList<>();
   private final HookWebhook webhook = new HookWebhook(null, 13337, sent::add);
+
+  /** A second webhook with an {@link HookWebhook#setAgentLaunch(java.util.function.BiConsumer)}
+   * listener wired, recording each (commandId, state) it was told — see the forwarding tests below. */
+  private final Map<String, String> activity = new java.util.LinkedHashMap<>();
+
+  private final HookWebhook notifying = new HookWebhook(null, 13337, sent::add);
+
+  {
+    notifying.setAgentLaunch((commandId, state) -> activity.put(commandId, state));
+  }
 
   private AgentActivity lastSent() {
     return (AgentActivity) sent.get(sent.size() - 1);
@@ -102,5 +113,53 @@ class HookWebhookTest {
     sent.clear();
     webhook.reportCurrent();
     assertTrue(sent.isEmpty());
+  }
+
+  // --- forwarding to AgentLaunchService (qits-617) -----------------------------------------------
+
+  @Test
+  void sessionStartAndStopForwardIdle() {
+    notifying.handle("SessionStart", payload("SessionStart"), "cmd-1");
+    assertEquals(AgentState.IDLE, activity.get("cmd-1"));
+
+    activity.clear();
+    notifying.handle("Stop", payload("Stop"), "cmd-1");
+    assertEquals(AgentState.IDLE, activity.get("cmd-1"));
+  }
+
+  @Test
+  void sessionEndForwardsEnded() {
+    notifying.handle("SessionEnd", payload("SessionEnd"), "cmd-1");
+    assertEquals(AgentState.ENDED, activity.get("cmd-1"));
+  }
+
+  @Test
+  void stopWhileWaitingForwardsTheStoredWaitingNotTheRawStop() {
+    notifying.handle("Notification", payload("Notification"), "cmd-1");
+    assertEquals(AgentState.WAITING, activity.get("cmd-1"));
+
+    activity.clear();
+    // The dropped Stop still reaches the launch service — with the state actually stored
+    // (WAITING), never the raw event's IDLE, or a queued rename would type into the open prompt.
+    notifying.handle("Stop", payload("Stop"), "cmd-1");
+    assertEquals(AgentState.WAITING, activity.get("cmd-1"));
+  }
+
+  @Test
+  void aThrowingListenerNeverEscapesHandle() {
+    HookWebhook throwing = new HookWebhook(null, 13337, sent::add);
+    throwing.setAgentLaunch(
+        (commandId, state) -> {
+          throw new RuntimeException("boom");
+        });
+    // Must not throw out of handle(): the hook's HTTP response always has to reach 200.
+    throwing.handle("SessionStart", payload("SessionStart"), "cmd-1");
+  }
+
+  @Test
+  void noListenerWiredIsANoOp() {
+    // webhook (the class field) never had setAgentLaunch called — handle must still work.
+    webhook.handle("SessionStart", payload("SessionStart"), "cmd-1");
+    assertEquals(AgentState.IDLE, lastSent().state());
   }
 }
