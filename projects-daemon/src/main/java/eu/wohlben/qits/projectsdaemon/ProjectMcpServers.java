@@ -152,10 +152,10 @@ final class ProjectMcpServers implements AgentMcpServers {
    * surface's configuration asks for, and it is absent for either of two unrelated reasons that both
    * resolve to the same {@link Optional#empty()} — the surface's configuration never named it (this
    * method is never called for it), or it named it but no address is configured
-   * ({@code qits.platform-mcp.url} / {@code QITS_PLATFORM_MCP_URL} unset). The second case is
-   * deliberately swallowed rather than surfaced as the host's own refusal: an operator can turn
-   * {@code qits} on for a surface before an address is wired to every container, and that should read
-   * as "not attached yet", not as a broken launch.
+   * ({@code qits.platform-mcp.url} / {@code QITS_PLATFORM_MCP_URL} unset). The second case answers
+   * empty like any key this host does not serve, so the launch refuses it with its own message naming
+   * the surface — a surface that attaches {@code qits} in a container with no address is a wiring
+   * fault to see, not a server to drop silently.
    */
   @Override
   public Optional<ScopedMcp> serverFor(
