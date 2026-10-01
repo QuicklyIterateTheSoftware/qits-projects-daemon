@@ -312,6 +312,13 @@ public class ControlSocket {
   volatile CheckoutFollower checkoutFollower;
 
   /**
+   * The live terminal and chat sessions {@link #wireCapabilities} spawns — held so {@link #stop}
+   * can terminate them ahead of everything else. See {@link #stopAgents} for why that ordering
+   * matters.
+   */
+  private volatile CommandRegistry commands;
+
+  /**
    * The follower's restart ladder and give-up rule, as this daemon's policy rather than as
    * configuration. They are constants and not keys on purpose: a knob here is a way to make the
    * give-up rule invisible, and the only caller that needs other values is a test driving the
@@ -497,6 +504,7 @@ public class ControlSocket {
     CommandLifecycleService lifecycle =
         new CommandLifecycleService(store, () -> nudge(ChangeTopic.COMMANDS));
     CommandRegistry commandRegistry = new CommandRegistry(WORKSPACE_DIR.toPath(), termGraceMs);
+    commands = commandRegistry;
     CommandService commandService =
         new CommandService(
             store, commandRegistry, lifecycle, logs, context, new NoDeclaredActions());
@@ -861,8 +869,10 @@ public class ControlSocket {
 
   @PreDestroy
   void stop() {
-    // First, because it owns a child process: stopping supervision before the worker pool goes
-    // means no restart can be scheduled into a half-torn-down daemon.
+    // Agents go first, before anything else is torn down — see stopAgents for why.
+    stopAgents(commands);
+    // Then the checkout follower, because it owns a child process: stopping supervision before the
+    // worker pool goes means no restart can be scheduled into a half-torn-down daemon.
     CheckoutFollower follower = checkoutFollower;
     if (follower != null) {
       follower.stop();
@@ -887,6 +897,31 @@ public class ControlSocket {
     WebSocketClient c = client;
     if (c != null) {
       c.close();
+    }
+  }
+
+  /**
+   * Terminate every live agent, ahead of everything else {@link #stop} tears down.
+   *
+   * <p>{@code claude --remote-control} archives its claude.ai session only on {@code SIGTERM}. Under
+   * tini (this container's PID 1) a plain {@code docker stop} reaches only this daemon: each agent
+   * is launched {@code setsid}'d into its own process group (see {@code CommandRegistry}'s javadoc),
+   * tini does not forward a signal to a group it did not start directly, and once this process exits
+   * the kernel {@code SIGKILL}s whatever is left in the container. {@link CommandRegistry#terminateAll}
+   * is this daemon's only chance to hand every live agent a {@code SIGTERM} at all, so it has to run
+   * before anything else — while the control socket, the network and the worker pool this method's
+   * caller is about to close are still up, which is what lets an agent's exit callback (the
+   * transcript sweep, the status update) report on its way out. Its grace ({@code termGraceMs},
+   * default 5s) shares the same config key as {@link CheckoutFollower#stop}'s own wait, so the two
+   * together already spend the full default grace twice — leave room under docker's 10s stop budget
+   * when raising either.
+   *
+   * <p>Package-private and static so it can be exercised without standing up the rest of {@link
+   * ControlSocket}.
+   */
+  static void stopAgents(CommandRegistry commands) {
+    if (commands != null) {
+      commands.terminateAll();
     }
   }
 }
