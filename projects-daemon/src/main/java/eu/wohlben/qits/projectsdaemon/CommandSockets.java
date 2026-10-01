@@ -138,7 +138,8 @@ final class CommandSockets {
     }
     switch (json.getString("type", "")) {
       case "data" ->
-          registry.input(commandId, json.getString("data", "").getBytes(StandardCharsets.UTF_8));
+          registry.personInput(
+              commandId, json.getString("data", "").getBytes(StandardCharsets.UTF_8));
       // The 80x24 fallbacks are the host socket's, and they are what a client that sends a resize
       // with a missing dimension gets rather than a zero-sized terminal.
       case "resize" ->

@@ -1,5 +1,6 @@
 package eu.wohlben.qits.projectsdaemon;
 
+import eu.wohlben.qits.agents.AgentLaunchService;
 import eu.wohlben.qits.projectsdaemon.protocol.AgentActivity;
 import eu.wohlben.qits.projectsdaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.projectsdaemon.protocol.DaemonProtocol.AgentState;
@@ -10,6 +11,7 @@ import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.json.JsonObject;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import org.jboss.logging.Logger;
 
@@ -46,12 +48,33 @@ final class HookWebhook {
   /** Last activity per qits command id; replayed by {@link #reportCurrent()}, evicted on end. */
   private final Map<String, AgentActivity> lastByCommand = new ConcurrentHashMap<>();
 
+  /**
+   * Set once {@link eu.wohlben.qits.projectsdaemon.ControlSocket#wireAgents} has built the {@link
+   * AgentLaunchService} — this webhook is created and started independent of, and before,
+   * provisioning finishes (see {@link ControlSocket#start()}), so a hook can fire before there is
+   * one to tell. Held as a {@link BiConsumer} (commandId, state) rather than the service type
+   * itself so a test can drive {@link #handle}'s forwarding without standing up the whole launch
+   * machinery; {@link #setAgentLaunch(AgentLaunchService)} is what production wires. Null until
+   * then, in which case {@link #handle} simply has nobody to forward to.
+   */
+  private volatile BiConsumer<String, String> agentLaunch;
+
   private volatile HttpServer server;
 
   HookWebhook(Vertx vertx, int port, Consumer<DaemonMessage> send) {
     this.vertx = vertx;
     this.port = port;
     this.send = send;
+  }
+
+  /** Wires the service that turns a stored activity into an interactive-rename signal. */
+  void setAgentLaunch(AgentLaunchService agentLaunch) {
+    this.agentLaunch = agentLaunch == null ? null : agentLaunch::onActivity;
+  }
+
+  /** Test seam: wire a bare listener instead of a real {@link AgentLaunchService}. */
+  void setAgentLaunch(BiConsumer<String, String> listener) {
+    this.agentLaunch = listener;
   }
 
   void start() {
@@ -96,6 +119,10 @@ final class HookWebhook {
     // A turn-finished Stop must not downgrade a pending permission prompt (WAITING wins).
     AgentActivity current = lastByCommand.get(commandId);
     if ("Stop".equals(hookEvent) && current != null && AgentState.WAITING.equals(current.state())) {
+      // Nothing changes in lastByCommand and no frame goes out, but the launch service still hears
+      // the stored state — WAITING, never the raw Stop's IDLE — so a queued rename keeps waiting on
+      // the permission prompt rather than firing into it.
+      notifyAgentLaunch(commandId, current.state());
       return;
     }
     AgentActivity activity =
@@ -113,6 +140,24 @@ final class HookWebhook {
       lastByCommand.put(commandId, activity);
     }
     send.accept(activity);
+    notifyAgentLaunch(commandId, state);
+  }
+
+  /**
+   * Tells the wired {@link AgentLaunchService} the stored state, if one is wired yet. This is the
+   * hook-response path: it must never throw into {@link #onRequest}'s {@code 200}, so any failure
+   * the listener raises is logged and swallowed here rather than left to propagate.
+   */
+  private void notifyAgentLaunch(String commandId, String state) {
+    BiConsumer<String, String> listener = agentLaunch;
+    if (listener == null) {
+      return;
+    }
+    try {
+      listener.accept(commandId, state);
+    } catch (RuntimeException e) {
+      LOG.debugf(e, "AgentLaunchService.onActivity failed for command %s", commandId);
+    }
   }
 
   /** Re-send the last known activity for every still-tracked command (reconnect adoption). */

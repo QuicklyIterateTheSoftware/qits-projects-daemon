@@ -559,6 +559,14 @@ public class ControlSocket {
             // different nouns on purpose and stay divergent; the library made the sentence an
             // argument rather than picking a winner.
             TASK_PROMPT_BOOTSTRAP);
+    // The webhook was created and started in start(), independent of (and possibly before)
+    // provisioning finishes here — wire it up now so a hook that fires from this point on can drive
+    // an interactive rename. Null-checked locally: hooks is volatile and @PreDestroy#stop() can race
+    // a hook arriving during shutdown.
+    HookWebhook h = hooks;
+    if (h != null) {
+      h.setAgentLaunch(launch);
+    }
     projectsApi.wireAgents(
         launch,
         new AgentSessionQueryService(store, agentSessionStore),

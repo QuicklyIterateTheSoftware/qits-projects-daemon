@@ -52,6 +52,7 @@ class CommandSocketsTest {
   private ProjectsApi api;
   private int port;
   private CommandService commands;
+  private CommandRegistry registry;
 
   private static final ProjectContext PROJECT =
       new ProjectContext() {
@@ -94,7 +95,7 @@ class CommandSocketsTest {
     api = new ProjectsApi();
     api.vertx = vertx;
     CommandStore store = new CommandStore();
-    CommandRegistry registry = new CommandRegistry(root, 2_000);
+    registry = new CommandRegistry(root, 2_000);
     commands =
         new CommandService(
             store,
@@ -153,6 +154,23 @@ class CommandSocketsTest {
     socket.writeTextMessage(new JsonObject().put("type", "data").put("data", "ping\n").encode());
 
     awaitContains(received, "ping");
+    socket.close();
+  }
+
+  @Test
+  @Timeout(60)
+  void terminalDataGoesThroughPersonInputSoAnUnsubmittedDraftIsTracked() throws Exception {
+    String commandId = launch("echo");
+    List<String> received = new CopyOnWriteArrayList<>();
+
+    WebSocket socket = connect("/terminal/commands/" + commandId, "Bearer " + TOKEN, received);
+    // No trailing \r/\n: a frame like this only moves CommandRegistry.hasDraft when it was written
+    // through personInput (registry.input, used for server-side injection, never touches the draft
+    // flag) — so an observed draft here is the proof the browser terminal is wired to personInput.
+    socket.writeTextMessage(new JsonObject().put("type", "data").put("data", "unsent").encode());
+
+    awaitContains(received, "unsent");
+    awaitDraft(commandId);
     socket.close();
   }
 
@@ -288,5 +306,16 @@ class CommandSocketsTest {
       Thread.sleep(25);
     }
     throw new AssertionError("timed out waiting for a frame containing '" + needle + "': " + frames);
+  }
+
+  private void awaitDraft(String commandId) throws InterruptedException {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+    while (System.nanoTime() < deadline) {
+      if (registry.hasDraft(commandId)) {
+        return;
+      }
+      Thread.sleep(25);
+    }
+    throw new AssertionError("timed out waiting for a draft on command " + commandId);
   }
 }
