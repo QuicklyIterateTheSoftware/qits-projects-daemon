@@ -24,6 +24,7 @@ import org.junit.jupiter.api.Test;
 class ProjectMcpServersTest {
 
   private static final String BASE = "http://qits-projects:8080/projects/mcp";
+  private static final String PLATFORM_URL = "http://dev-qits-platform-access-mcp-service:8080/mcp";
 
   private final ProjectMcpServers servers =
       new ProjectMcpServers(new FixedEndpoints("proj-7"), "qits-qits");
@@ -100,6 +101,35 @@ class ProjectMcpServersTest {
   }
 
   @Test
+  void theQitsServerIsPresentWhenItsUrlIsConfigured() {
+    ProjectMcpServers withPlatform =
+        new ProjectMcpServers(new FixedEndpoints("proj-7", Optional.of(PLATFORM_URL)), "qits-qits");
+
+    Optional<ScopedMcp> server =
+        withPlatform.serverFor(
+            "qits", AgentMcpScope.PROJECT, new AgentMcpNarrowing(true, true, true));
+
+    assertTrue(server.isPresent());
+    assertEquals("qits", server.get().key());
+    assertEquals(
+        PLATFORM_URL,
+        server.get().url(),
+        "no query parameters, regardless of what narrowing was asked: the server is scoped by the"
+            + " caller's own bearer, not by the url");
+    assertEquals(ProjectMcpServers.QITS_TOOLS, server.get().allowedTools());
+  }
+
+  @Test
+  void theQitsServerIsAbsentWithoutAConfiguredUrl() {
+    // No platform url at all — the endpoint this daemon was built with has nowhere to address
+    // "qits", which must read as "not attached" rather than a refused launch.
+    assertTrue(
+        servers
+            .serverFor("qits", AgentMcpScope.PROJECT, new AgentMcpNarrowing(true, false, false))
+            .isEmpty());
+  }
+
+  @Test
   void theSeamIsHonoured() {
     assertTrue(
         servers.honoursNarrowing(),
@@ -126,13 +156,22 @@ class ProjectMcpServersTest {
     return server.orElseThrow();
   }
 
-  private record FixedEndpoints(String projectId) implements McpEndpoints {
+  private record FixedEndpoints(String projectId, Optional<String> platformUrl)
+      implements McpEndpoints {
+    FixedEndpoints(String projectId) {
+      this(projectId, Optional.empty());
+    }
+
     @Override
     public String mcpUrl(String server) {
-      if (!"repository".equals(server)) {
-        throw new InvalidCommandRequestException("Unknown MCP server '" + server + "'");
+      if ("repository".equals(server)) {
+        return BASE;
       }
-      return BASE;
+      if ("qits".equals(server)) {
+        return platformUrl.orElseThrow(
+            () -> new InvalidCommandRequestException("No address for the 'qits' MCP server"));
+      }
+      throw new InvalidCommandRequestException("Unknown MCP server '" + server + "'");
     }
   }
 }

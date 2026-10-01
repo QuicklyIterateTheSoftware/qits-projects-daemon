@@ -6,7 +6,9 @@ import java.net.URI;
 import java.util.Optional;
 
 /**
- * Resolves the agent's MCP base URL. One server, {@code repository}, at {@code /projects/mcp}.
+ * Resolves the agent's MCP base URLs: {@code repository} at {@code /projects/mcp}, and the central
+ * platform server {@code qits} (qits-630) at a wholly separate address this daemon is only ever
+ * told, never derives.
  *
  * <p><b>Why there is no WARN here.</b> The workspace daemon derived three MCP hosts from its
  * control-socket authority and warned on every one of them, because the control socket was
@@ -26,6 +28,12 @@ import java.util.Optional;
  * <p>The override is also what points an agent at a different qits instance, or at a separately
  * deployed MCP server if that ever splits out. Contrast {@link Provisioner}, whose git base
  * <em>is</em> a guess about another service and does warn.
+ *
+ * <p><b>{@code qits}, the central platform server (qits-630), is a third case: no derivation at
+ * all.</b> {@code repository} can fall back to the control socket's own authority because the
+ * control socket and that server are the same service; {@code qits} is a separately deployed
+ * service with no relationship to this daemon's dial-home address, so there is nothing sound to
+ * derive it from. It is configured or it is absent — never guessed.
  */
 final class DaemonMcpEndpoints implements McpEndpoints {
 
@@ -34,35 +42,63 @@ final class DaemonMcpEndpoints implements McpEndpoints {
 
   static final String REPOSITORY_SEGMENT = "/projects/mcp";
 
+  /** The central platform-access MCP server (qits-630) — see the class javadoc. */
+  static final String PLATFORM_SERVER = "qits";
+
   private final String httpBase;
   private final String projectId;
   private final Optional<String> repositoryOverride;
+  private final Optional<String> platformOverride;
 
   /**
    * @param daemonUrl the control-socket URL, {@code ws://host:port/projects/daemon/<projectId>}
    * @throws IllegalStateException if {@code daemonUrl} carries no usable authority — a daemon
    *     without one never connected, so it cannot be serving agent launches either
    */
-  DaemonMcpEndpoints(String daemonUrl, String projectId, Optional<String> repositoryOverride) {
+  DaemonMcpEndpoints(
+      String daemonUrl,
+      String projectId,
+      Optional<String> repositoryOverride,
+      Optional<String> platformOverride) {
     this.httpBase = httpBaseOf(daemonUrl);
     this.projectId = projectId;
     this.repositoryOverride = repositoryOverride;
+    this.platformOverride = platformOverride;
   }
 
   /**
-   * @throws InvalidCommandRequestException for a server name this daemon does not address.
-   *     Deliberately not a silent fallback: a made-up base fails later as a 404 the agent reports
-   *     as "tool unavailable", and the launch reads as having worked. {@code
-   *     InvalidCommandRequestException} because it is the one {@link ProjectsApi} answers with the
-   *     message attached (400) rather than swallowing into "Internal error".
+   * @throws InvalidCommandRequestException for a server name this daemon does not address, or for
+   *     {@link #PLATFORM_SERVER} when it has no configured address. Deliberately not a silent
+   *     fallback: a made-up base fails later as a 404 the agent reports as "tool unavailable", and
+   *     the launch reads as having worked. {@code InvalidCommandRequestException} because it is the
+   *     one {@link ProjectsApi} answers with the message attached (400) rather than swallowing into
+   *     "Internal error".
    */
   @Override
   public String mcpUrl(String server) {
     if (REPOSITORY_SERVER.equals(server)) {
-      return configured().orElse(httpBase + REPOSITORY_SEGMENT);
+      return configured(repositoryOverride).orElse(httpBase + REPOSITORY_SEGMENT);
+    }
+    if (PLATFORM_SERVER.equals(server)) {
+      // Thrown, never made up: ProjectMcpServers treats this as "not configured, attach nothing"
+      // by catching it rather than letting it reach a launch, exactly as it already does for a key
+      // (like "observability") this host never serves at all.
+      return configured(platformOverride)
+          .orElseThrow(
+              () ->
+                  new InvalidCommandRequestException(
+                      "No address for the 'qits' platform MCP server: set"
+                          + " qits.platform-mcp.url (QITS_PLATFORM_MCP_URL). There is no segment to"
+                          + " derive it from — it is a separately deployed service, not qits-projects."));
     }
     throw new InvalidCommandRequestException(
-        "Unknown MCP server '" + server + "': this daemon addresses " + REPOSITORY_SERVER + " only.");
+        "Unknown MCP server '"
+            + server
+            + "': this daemon addresses "
+            + REPOSITORY_SERVER
+            + " and "
+            + PLATFORM_SERVER
+            + " only.");
   }
 
   @Override
@@ -70,8 +106,8 @@ final class DaemonMcpEndpoints implements McpEndpoints {
     return projectId;
   }
 
-  private Optional<String> configured() {
-    return repositoryOverride.map(String::trim).filter(value -> !value.isEmpty());
+  private static Optional<String> configured(Optional<String> override) {
+    return override.map(String::trim).filter(value -> !value.isEmpty());
   }
 
   /**

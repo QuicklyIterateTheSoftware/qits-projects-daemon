@@ -80,6 +80,15 @@ final class ProjectMcpServers implements AgentMcpServers {
           "mcp__repository__list_tickets",
           "mcp__repository__get_ticket");
 
+  /**
+   * The central platform-access MCP server's own pre-approval (qits-630). It plays no real part in
+   * what reaches Claude: {@link eu.wohlben.qits.agents.AgentLaunchService} recognises the {@code
+   * qits} key itself and renders {@code mcp__qits__*} regardless of what a {@link ScopedMcp} carries
+   * here, because the caller's own bearer — not a tool allowlist — is what decides what a call may
+   * do. Kept anyway so a {@code ScopedMcp} for this key is never a lie about what is approved.
+   */
+  static final List<String> QITS_TOOLS = List.of("mcp__qits__*");
+
   private final McpEndpoints endpoints;
   private final String repoName;
 
@@ -137,13 +146,34 @@ final class ProjectMcpServers implements AgentMcpServers {
    *       quietly answer for the whole project — a session missing half its narrowing looks
    *       entirely normal and answers about things it was configured not to see.
    * </ul>
+   *
+   * <p>{@code qits} (qits-630) is the exception to all of the above: it is scoped by the caller's own
+   * bearer, not by a url, so it takes <b>no</b> query parameters regardless of what narrowing a
+   * surface's configuration asks for, and it is absent for either of two unrelated reasons that both
+   * resolve to the same {@link Optional#empty()} — the surface's configuration never named it (this
+   * method is never called for it), or it named it but no address is configured
+   * ({@code qits.platform-mcp.url} / {@code QITS_PLATFORM_MCP_URL} unset). The second case is
+   * deliberately swallowed rather than surfaced as the host's own refusal: an operator can turn
+   * {@code qits} on for a surface before an address is wired to every container, and that should read
+   * as "not attached yet", not as a broken launch.
    */
   @Override
   public Optional<ScopedMcp> serverFor(
       String key, AgentMcpScope scope, AgentMcpNarrowing narrowing) {
+    if (DaemonMcpEndpoints.PLATFORM_SERVER.equals(key)) {
+      try {
+        return Optional.of(
+            new ScopedMcp(
+                DaemonMcpEndpoints.PLATFORM_SERVER,
+                endpoints.mcpUrl(DaemonMcpEndpoints.PLATFORM_SERVER),
+                QITS_TOOLS));
+      } catch (InvalidCommandRequestException noAddressConfigured) {
+        return Optional.empty();
+      }
+    }
     if (!DaemonMcpEndpoints.REPOSITORY_SERVER.equals(key)) {
-      // The one key this host serves. Empty rather than an exception: the launch turns it into its
-      // own refusal, naming the surface that asked.
+      // The one other key this host serves. Empty rather than an exception: the launch turns it
+      // into its own refusal, naming the surface that asked.
       return Optional.empty();
     }
     // Null is "no narrowing asked", the same as an all-false one: the unscoped, platform-wide url.

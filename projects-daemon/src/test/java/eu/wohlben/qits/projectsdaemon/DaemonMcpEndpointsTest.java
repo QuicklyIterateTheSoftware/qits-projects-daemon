@@ -18,7 +18,11 @@ class DaemonMcpEndpointsTest {
   private static final String DIAL_HOME = "ws://qits-projects:8080/projects/daemon/" + PROJECT;
 
   private static DaemonMcpEndpoints endpoints(Optional<String> repository) {
-    return new DaemonMcpEndpoints(DIAL_HOME, PROJECT, repository);
+    return endpoints(repository, Optional.empty());
+  }
+
+  private static DaemonMcpEndpoints endpoints(Optional<String> repository, Optional<String> platform) {
+    return new DaemonMcpEndpoints(DIAL_HOME, PROJECT, repository, platform);
   }
 
   private static DaemonMcpEndpoints derived() {
@@ -77,5 +81,28 @@ class DaemonMcpEndpointsTest {
   @Test
   void theProjectIdIsPassedThroughUntouched() {
     assertEquals(PROJECT, derived().projectId());
+  }
+
+  @Test
+  void thePlatformServerUsesTheExplicitUrlWhenConfigured() {
+    assertEquals(
+        "http://dev-qits-platform-access-mcp-service:8080/mcp",
+        endpoints(Optional.empty(), Optional.of("http://dev-qits-platform-access-mcp-service:8080/mcp"))
+            .mcpUrl("qits"));
+  }
+
+  @Test
+  void thePlatformServerHasNoAddressToDeriveWhenUnconfigured() {
+    // Unlike "repository", there is no fallback: qits is a separately deployed service with no
+    // relationship to this daemon's dial-home address, so a missing address fails loudly instead of
+    // being made up.
+    assertThrows(InvalidCommandRequestException.class, () -> derived().mcpUrl("qits"));
+  }
+
+  @Test
+  void aBlankPlatformOverrideIsNoOverride() {
+    assertThrows(
+        InvalidCommandRequestException.class,
+        () -> endpoints(Optional.empty(), Optional.of("   ")).mcpUrl("qits"));
   }
 }

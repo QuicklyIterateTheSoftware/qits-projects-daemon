@@ -236,6 +236,15 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.repository-mcp.url")
   Optional<String> repositoryMcpUrl;
 
+  /**
+   * Explicit MCP base URL for the central platform-access {@code qits} server (qits-630). Unlike
+   * {@link #repositoryMcpUrl}, there is no derivation to fall back to — it is a separately deployed
+   * service with no relationship to this daemon's dial-home address — so unset simply means the
+   * server is not attached, the same as a surface whose configuration never asked for it.
+   */
+  @ConfigProperty(name = "qits.platform-mcp.url")
+  Optional<String> platformMcpUrl;
+
   // Resolved from config in start(); package-private so a test can wire the surface without dialling
   // home.
   String projectId = "";
@@ -528,7 +537,8 @@ public class ControlSocket {
             DaemonAgentDefaults.factsOf(projectId, repoName));
     DaemonMcpEndpoints endpoints;
     try {
-      endpoints = new DaemonMcpEndpoints(url.orElse(null), projectId, repositoryMcpUrl);
+      endpoints =
+          new DaemonMcpEndpoints(url.orElse(null), projectId, repositoryMcpUrl, platformMcpUrl);
     } catch (IllegalStateException e) {
       LOG.warnf("Coding agents stay unwired: %s", e.getMessage());
       return;

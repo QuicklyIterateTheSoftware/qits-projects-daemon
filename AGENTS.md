@@ -364,6 +364,12 @@ One address is derived from the url the container is handed; the other used to b
   `ProvisionFailed` — no clone. The old fallback (`<authority>/artifacts/git`) named the pre-split
   host, which serves no git at all, so it could only convert a missing setting into a connection
   error against the wrong service.
+- **The central platform MCP server** (`DaemonMcpEndpoints`, qits-630): `qits` is a separately
+  deployed service with no relationship whatsoever to the control socket's authority, so there is
+  nothing to derive and no fallback at all — unlike `repository` above. Unset simply means the
+  server is not attached to any launch, the same outcome as a surface whose configuration never
+  named it; `ProjectMcpServers.serverFor` is what turns the thrown
+  `InvalidCommandRequestException` into that quiet absence rather than a refused launch.
 
 Keep that distinction if either moves. A warning on a sound derivation trains people to ignore
 warnings; a silent unsound one loses a whole class of misconfiguration; an address nothing can
@@ -383,14 +389,17 @@ derive fails at the boundary instead of far from it.
     QITS_PROJECTS_DAEMON_AUTH_TOKEN_URL  idp token endpoint for authenticated dial-home
     QITS_PROJECTS_DAEMON_AUTH_AUDIENCE   qits-projects' environment client id
     QITS_PROJECTS_DAEMON_GIT_AUTH_AUDIENCE qits-githost's environment client id
-    QITS_REPOSITORY_MCP_URL              the one MCP server a launch attaches; absent ⇒ derived
+    QITS_REPOSITORY_MCP_URL              the one repository MCP server a launch attaches; absent ⇒ derived
+    QITS_PLATFORM_MCP_URL                the central qits platform MCP server (qits-630); absent ⇒ not attached, NOTHING derived
     QITS_COMMISSIONED_CLIENT_ID          this container's idp client; absent ⇒ anonymous dev dial
     QITS_COMMISSIONED_CLIENT_SECRET      its one-time secret
 
-`QITS_REPOSITORY_MCP_URL` is the odd name out — no `QITS_PROJECTS_DAEMON_` prefix — because it is
-the existing `qits.repository-mcp.url` key, the spelling the workspace daemon uses for the same
-server. qits-projects injects it on every container it creates, so the address is stated; absent, it
-falls back to the derivation in `DaemonMcpEndpoints`.
+`QITS_REPOSITORY_MCP_URL` and `QITS_PLATFORM_MCP_URL` are the odd names out — no
+`QITS_PROJECTS_DAEMON_` prefix — because they are the existing `qits.repository-mcp.url` /
+`qits.platform-mcp.url` keys, the same spellings the workspace daemon uses for its own MCP servers.
+qits-projects injects both on every container it creates. `QITS_REPOSITORY_MCP_URL` absent falls
+back to the derivation in `DaemonMcpEndpoints`; `QITS_PLATFORM_MCP_URL` absent has no derivation at
+all, so the `qits` server is simply not attached.
 
 Every identity value is `Optional<String>` in the code, never `@ConfigProperty(defaultValue = "")`:
 SmallRye reads an empty default as *no value* and then fails to resolve a plain `String`, which
