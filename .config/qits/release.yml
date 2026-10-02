@@ -15,13 +15,9 @@ artifacts:
   # without the pair ever having been built together. Now the version travels as the version of the
   # artifact that also carries the wire contract. ProjectAgentImage's javadoc has the reasoning.
   #
-  # IT CARRIES NO `sbom:`, AND THE DOCUMENT IS NOT LOST. The composed postlude runs in ONE step —
-  # the last one that builds — and a step container shares nothing with the next: the jar's document
-  # is written by `makeBom` in the maven step below, which is not that step and whose files the
-  # builder step has never seen. So that step submits its own document through the same `qits` CLI
-  # the postlude would have used. An `sbom:` here would make the builder step submit a path that
-  # does not exist in it.
-  - { type: maven, name: "eu.wohlben.qits:qits-projects-daemon-protocol", path: projects-daemon-protocol }
+  # qits-ci submits this `sbom:` from whichever release step holds the file — the maven step below,
+  # where `makeBom` writes it — and checks on the last step that it reached the store.
+  - { type: maven, name: "eu.wohlben.qits:qits-projects-daemon-protocol", path: projects-daemon-protocol, sbom: projects-daemon-protocol/target/sbom.json }
 
 # TWO IMAGES FROM ONE TREE, WHICH NO ARCHETYPE PUSHES. java-service's extractor refuses anything but
 # exactly one docker entry, and the second image is a different Dockerfile (`Dockerfile.projects`)
@@ -145,9 +141,3 @@ release:
         -Dqits.maven.repository.url="$QITS_MAVEN_REGISTRY_URL" \
         org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeBom \
         -DoutputFormat=json -DoutputName=sbom -DschemaVersion=1.6
-      # SUBMITTED HERE BECAUSE THE POSTLUDE CANNOT REACH IT — see the artifact's comment above. The
-      # CLI is on this step's PATH like any release step's, and its idempotency policy is the one
-      # the postlude runs.
-      qits artifacts publish sbom submit \
-        --type maven --name "eu.wohlben.qits:qits-projects-daemon-protocol" \
-        --version "$QITS_VERSION" --file projects-daemon-protocol/target/sbom.json
