@@ -21,7 +21,7 @@ artifacts:
   # builder step has never seen. So that step submits its own document through the same `qits` CLI
   # the postlude would have used. An `sbom:` here would make the builder step submit a path that
   # does not exist in it.
-  - { type: maven, name: "eu.wohlben.qits:qits-projects-daemon-protocol" }
+  - { type: maven, name: "eu.wohlben.qits:qits-projects-daemon-protocol", path: projects-daemon-protocol }
 
 # TWO IMAGES FROM ONE TREE, WHICH NO ARCHETYPE PUSHES. java-service's extractor refuses anything but
 # exactly one docker entry, and the second image is a different Dockerfile (`Dockerfile.projects`)
