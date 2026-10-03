@@ -58,8 +58,9 @@ checkouts, no docker. Nothing here may depend on a `-SNAPSHOT` this repository d
 The rule gained one word with the harness cutover: **no network beyond Maven Central and the
 platform's own Maven registry**, where `eu.wohlben.qits:qits-coding-agents` is published. That is
 why the root pom now declares a `qits-maven` repository and why both CI recipes and
-`docker/Dockerfile` pass `QITS_MAVEN_REPOSITORY_URL` — the id has to stay `qits-maven` or the
-settings file's exact-id mirror stops outranking Maven's http-repository blocker.
+`docker/Dockerfile` derive `https://registry.qits.$QITS_DOMAIN/artifacts/maven/maven` (qits-731) — the
+id has to stay `qits-maven` or the settings file's exact-id mirror stops outranking Maven's
+http-repository blocker.
 
 Tests that need a PTY are `@EnabledOnOs(LINUX)` — `ForeignPty` calls libc through
 `java.lang.foreign`, and the descriptors are Linux ABI. Keep that annotation on anything that

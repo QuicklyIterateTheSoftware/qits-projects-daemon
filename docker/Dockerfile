@@ -51,25 +51,24 @@ RUN ./mvnw --version
 # keeps this cheap — without it this line drags in every target/ dir.
 COPY . .
 
-# Where Maven Central is mirrored, when it is. CI passes the platform's pull-through
-# (qits-platform-mirror's central proxy, the same authority the FROM line above pulls through);
-# EMPTY — the default — means direct Maven Central. `.qits-maven-settings.xml` activates its
-# central-proxy profile only on a non-empty value, so a hand build that passes nothing resolves
-# exactly as it always did.
-ARG QITS_MAVEN_CENTRAL_URL=
-ENV QITS_MAVEN_CENTRAL_URL=$QITS_MAVEN_CENTRAL_URL
-
-# Where the platform publishes the shared harness library (eu.wohlben.qits:qits-coding-agents and
-# :qits-commands). NEW WITH THE HARNESS CUTOVER: this reactor built those two as modules until the
-# union of both daemons' copies moved to its own repository, so this build resolved from Central
-# alone and needed no registry at all. It does now, and a build that cannot reach it fails on an
-# unresolved dependency rather than on anything that names the real cause — hence the ARG, with a
-# default a developer's machine can resolve. `-s .qits-maven-settings.xml` is what makes an http://
-# repository resolvable in the first place: Maven blocks external http repositories, and the
-# settings' exact-repository-id mirror is the one thing that outranks the blocker. It reads this
-# variable, so an unset one leaves the mirror url unexpanded.
-ARG QITS_MAVEN_REPOSITORY_URL=http://registry.dev.localhost:8080/artifacts/maven/maven
-ENV QITS_MAVEN_REPOSITORY_URL=$QITS_MAVEN_REPOSITORY_URL
+# Both platform hosts are code plus one input, the public domain (qits-731):
+#
+#   https://registry.qits.$QITS_DOMAIN/artifacts/maven/maven   hosted Maven (qits-artifacts) — the
+#     shared harness library (eu.wohlben.qits:qits-coding-agents and :qits-commands) lives only here.
+#     NEW WITH THE HARNESS CUTOVER: this reactor built those two as modules until the union of both
+#     daemons' copies moved to its own repository, so this build resolved from Central alone and
+#     needed no registry at all. It does now, and a build that cannot reach it fails on an unresolved
+#     dependency rather than on anything that names the real cause. `-s .qits-maven-settings.xml` is
+#     what makes this resolvable in the first place: Maven blocks external http repositories, and
+#     the settings' exact-repository-id mirror is the one thing that outranks the blocker.
+#   https://mirror.qits.$QITS_DOMAIN/mirror/maven/central      Maven Central cache (qits-mirror)
+#
+# `QITS_DOMAIN` is an ENV, not left as a bare ARG, because it has to reach the `runnable` stage's RUN
+# below too, and that stage is built `FROM build` rather than redeclaring the ARG. The two RUNs
+# derive the full URLs themselves; `wohlben.eu` is the developer-host default, so a plain host-side
+# `docker build` still works.
+ARG QITS_DOMAIN=wohlben.eu
+ENV QITS_DOMAIN=$QITS_DOMAIN
 
 # -Dnative flips quarkus.native.enabled (this project carries its own `native` profile). Cap
 # native-image RAM so the build is deterministic on small machines.
@@ -90,8 +89,9 @@ RUN --mount=type=secret,id=qits-client-id \
     --mount=type=secret,id=qits-client-secret \
     QITS_MAVEN_AUTH_USR="$(cat /run/secrets/qits-client-id 2>/dev/null || true)" \
     QITS_MAVEN_AUTH_PSW="$(cat /run/secrets/qits-client-secret 2>/dev/null || true)" \
+    QITS_MAVEN_CENTRAL_URL="https://mirror.qits.$QITS_DOMAIN/mirror/maven/central" \
     ./mvnw -B -ntp -s .qits-maven-settings.xml -pl projects-daemon -am package -Dnative -DskipTests \
-      -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
+      -Dqits.maven.repository.url="https://registry.qits.$QITS_DOMAIN/artifacts/maven/maven" \
       -Dquarkus.native.native-image-xmx=4g \
       org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeBom \
       -DoutputFormat=json -DoutputName=sbom -DschemaVersion=1.6 \
@@ -159,8 +159,9 @@ RUN --mount=type=secret,id=qits-client-id \
     --mount=type=secret,id=qits-client-secret \
     QITS_MAVEN_AUTH_USR="$(cat /run/secrets/qits-client-id 2>/dev/null || true)" \
     QITS_MAVEN_AUTH_PSW="$(cat /run/secrets/qits-client-secret 2>/dev/null || true)" \
+    QITS_MAVEN_CENTRAL_URL="https://mirror.qits.$QITS_DOMAIN/mirror/maven/central" \
     ./mvnw -B -ntp -s .qits-maven-settings.xml -pl projects-daemon -am package -DskipTests \
-      -Dqits.maven.repository.url="$QITS_MAVEN_REPOSITORY_URL" \
+      -Dqits.maven.repository.url="https://registry.qits.$QITS_DOMAIN/artifacts/maven/maven" \
       -Dquarkus.package.jar.enabled=true \
       -Dquarkus.package.jar.type=uber-jar
 

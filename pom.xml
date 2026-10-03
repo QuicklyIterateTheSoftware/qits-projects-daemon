@@ -49,10 +49,9 @@
              carrying neither key would have been guessed. -->
         <qits-coding-agents.version>2026.1002.170855</qits-coding-agents.version>
 
-        <!-- Where the platform publishes it. Overridden by CI (-Dqits.maven.repository.url) and by
-             the image build's QITS_MAVEN_REPOSITORY_URL build-arg; the default is the address a
-             developer's machine resolves. -->
-        <qits.maven.repository.url>http://registry.dev.localhost:8080/artifacts/maven/maven</qits.maven.repository.url>
+        <!-- Where the platform publishes it. Overridden by CI (-Dqits.maven.repository.url), derived
+             from QITS_DOMAIN; the default below is the public host. -->
+        <qits.maven.repository.url>https://registry.qits.wohlben.eu/artifacts/maven/maven</qits.maven.repository.url>
     </properties>
 
     <dependencyManagement>
