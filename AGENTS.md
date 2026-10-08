@@ -394,13 +394,26 @@ derive fails at the boundary instead of far from it.
     QITS_PLATFORM_MCP_URL                the central qits platform MCP server (qits-630); absent ⇒ not attached, NOTHING derived
     QITS_COMMISSIONED_CLIENT_ID          this container's idp client; absent ⇒ anonymous dev dial
     QITS_COMMISSIONED_CLIENT_SECRET      its one-time secret
+    QITS_TOKEN                           runner-placed (edge) container's project token; set ⇒ it is the bearer on the
+                                         control socket, every dial-back, the clone's git header and the repository/qits
+                                         MCP servers, and NOTHING is minted; absent ⇒ the pair above (client_secret_post)
+    QITS_TOKEN_SUBJECT                   whom that token names; read for the boot log only
+    QITS_PROJECTS_DAEMON_LIFECYCLE       ALWAYS_ON | ON_DEMAND (default); ALWAYS_ON keeps a project.work front-desk
+                                         session running (the always-on session — not read until that lands)
 
-`QITS_REPOSITORY_MCP_URL` and `QITS_PLATFORM_MCP_URL` are the odd names out — no
+`QITS_REPOSITORY_MCP_URL` and `QITS_PLATFORM_MCP_URL` are two of the odd names out — no
 `QITS_PROJECTS_DAEMON_` prefix — because they are the existing `qits.repository-mcp.url` /
 `qits.platform-mcp.url` keys, the same spellings the workspace daemon uses for its own MCP servers.
 qits-projects injects both on every container it creates. `QITS_REPOSITORY_MCP_URL` absent falls
 back to the derivation in `DaemonMcpEndpoints`; `QITS_PLATFORM_MCP_URL` absent has no derivation at
 all, so the `qits` server is simply not attached.
+
+`QITS_TOKEN` and `QITS_TOKEN_SUBJECT` carry no prefix either, and for the same reason: they are the
+spellings qits-workspace-daemon already reads (qits-625), and the CLI's EDGE_TOKEN mode reads the
+same `QITS_TOKEN` for the checkout follower and the `qits` MCP entry's headers helper. With the
+token set the dial-home url is the edge's `wss://projects.qits.<domain>/projects/daemon/<projectId>`;
+`DaemonDial` (copied from the workspace daemon) turns `wss` into TLS on 443 for both the control
+socket and the dial-back.
 
 Every identity value is `Optional<String>` in the code, never `@ConfigProperty(defaultValue = "")`:
 SmallRye reads an empty default as *no value* and then fails to resolve a plain `String`, which

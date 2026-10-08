@@ -1,12 +1,12 @@
 package eu.wohlben.qits.projectsdaemon;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
-import java.util.Base64;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -38,11 +38,11 @@ class ControlSocketAuthenticationTest {
       socket.authAudience = Optional.of("dev-qits-projects");
 
       assertEquals(Optional.of("Bearer machine-token"), socket.authorization().get());
-      assertEquals(
-          "Basic "
-              + Base64.getEncoder()
-                  .encodeToString("dyn-agent:one-time-secret".getBytes(StandardCharsets.UTF_8)),
-          authorization.get());
+      // client_secret_post: the pair travels in the form body and no Basic header is sent — the
+      // edge eats a Basic header rather than forwarding it (qits-767, as qits-625 did).
+      assertNull(authorization.get(), "no Authorization header on the mint");
+      assertTrue(body.get().contains("client_id=dyn-agent"), body.get());
+      assertTrue(body.get().contains("client_secret=one-time-secret"), body.get());
       assertTrue(body.get().contains("grant_type=client_credentials"), body.get());
       assertTrue(body.get().contains("audience=dev-qits-projects"), body.get());
     } finally {

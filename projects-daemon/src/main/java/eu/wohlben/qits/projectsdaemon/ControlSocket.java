@@ -46,7 +46,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.Base64;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -125,6 +124,26 @@ public class ControlSocket {
   /** The qits-githost audience used only while self-cloning the project checkout. */
   @ConfigProperty(name = "qits.projects-daemon.git-auth-audience")
   Optional<String> gitAuthAudience;
+
+  /**
+   * The project token ({@code QITS_TOKEN}), set only on a runner-placed project container — a front
+   * desk on somebody's own machine, which reaches qits only through the public edge, and the edge
+   * admits a bearer and nothing else. Where it is set it is the whole credential: the control
+   * socket, every tunnel dial-back, the boot clone's git header and the platform MCP servers all
+   * present it as is, and nothing is minted ({@link #authorization()}) — not even when a
+   * commissioned pair happens to be present too. Read here and nowhere else; everything else is
+   * handed it. The same shape as qits-workspace-daemon's {@code qits.workspace-daemon.token}
+   * (qits-625).
+   */
+  @ConfigProperty(name = "qits.projects-daemon.token")
+  Optional<String> token;
+
+  /**
+   * Whom {@link #token} was minted for ({@code QITS_TOKEN_SUBJECT}). Read for the boot log only: it
+   * names the credential in the container's stdout without printing the credential.
+   */
+  @ConfigProperty(name = "qits.projects-daemon.token-subject")
+  Optional<String> tokenSubject;
 
   // Identity is Optional<String>, not @ConfigProperty(defaultValue = ""): SmallRye treats an empty
   // default as "no value" and fails to resolve a plain String when the env is absent. Resolved to
@@ -390,12 +409,22 @@ public class ControlSocket {
     // up.
     hooks = new HookWebhook(vertx, hooksPort, this::send);
     hooks.start();
+    if (bearer().isPresent()) {
+      LOG.infof(
+          "projects-daemon reaches qits with its project token (subject %s); nothing is minted.",
+          tokenSubject == null
+              ? "unknown"
+              : tokenSubject.filter(value -> !value.isBlank()).orElse("unknown"));
+    }
     // The reverse tunnel qits reaches ProjectsApi through. Independent of provisioning for the same
     // reason the hook webhook is: it only needs the url and the port, and a stream requested before
     // the API is up simply fails to connect to loopback and answers nothing.
-    tunnel = new DaemonStreamTunnel(vertx, url.get(), projectsApi.apiPort());
+    tunnel =
+        new DaemonStreamTunnel(
+            vertx, url.get(), this::dialBackAuthorization, projectsApi.apiPort());
     tunnel.start();
-    client = vertx.createWebSocketClient();
+    // TLS for a wss url, with host verification against the default trust store (DaemonDial).
+    client = vertx.createWebSocketClient(DaemonDial.clientOptions());
     if (heartbeatIntervalMs > 0) {
       vertx.setPeriodic(heartbeatIntervalMs, id -> heartbeat());
     }
@@ -414,6 +443,8 @@ public class ControlSocket {
         () -> {
           String gitAuthorization = "";
           try {
+            // The project token, when set, is the git header as is and nothing is minted;
+            // otherwise a bearer for qits-githost's audience.
             gitAuthorization = authorization(gitAuthAudience).join().orElse("");
           } catch (RuntimeException e) {
             send(
@@ -561,7 +592,7 @@ public class ControlSocket {
             defaults,
             // The scope→server mapping is this daemon's, not the library's: one server, the
             // repository one, project- or repository-narrowed. See ProjectMcpServers.
-            new ProjectMcpServers(endpoints, repoName),
+            new ProjectMcpServers(endpoints, repoName, token),
             context,
             claudeMount,
             hooksPort,
@@ -664,7 +695,7 @@ public class ControlSocket {
       LOG.errorf(e, "Malformed qits.projects-daemon.url '%s' — projects-daemon idle.", url.get());
       return; // an unparseable URL will not become parseable on retry; stay alive, stay idle
     }
-    authorization(authAudience)
+    authorization()
         .whenComplete(
             (authorization, failure) ->
                 vertx.runOnContext(
@@ -681,12 +712,8 @@ public class ControlSocket {
   }
 
   private void connect(URI uri, int attempt, Optional<String> authorization) {
-    int port = uri.getPort() != -1 ? uri.getPort() : 80;
-    WebSocketConnectOptions options =
-        new WebSocketConnectOptions().setHost(uri.getHost()).setPort(port).setURI(uri.getRawPath());
-    authorization.ifPresent(value -> options.addHeader("Authorization", value));
     client
-        .connect(options)
+        .connect(dialOptions(uri, authorization))
         .onSuccess(this::onConnected)
         .onFailure(
             t -> {
@@ -696,16 +723,69 @@ public class ControlSocket {
   }
 
   /**
-   * Mint the commissioned container's machine token without blocking the Vert.x event loop.
-   * Absent configuration keeps the clone-alone/developer topology anonymous; a partial
-   * configuration fails closed and is retried with the socket.
+   * The control socket's connect options: TLS and the default port follow the url's scheme ({@link
+   * DaemonDial}), and {@code authorization} rides as the {@code Authorization} header.
    */
-  java.util.concurrent.CompletableFuture<Optional<String>> authorization() {
-    return authorization(authAudience);
+  static WebSocketConnectOptions dialOptions(URI uri, Optional<String> authorization) {
+    return DaemonDial.connectOptions(uri, authorization);
   }
 
-  private java.util.concurrent.CompletableFuture<Optional<String>> authorization(
+  /** The project token as a header value, or empty when this container was handed none. */
+  Optional<String> bearer() {
+    return token == null
+        ? Optional.empty()
+        : token.filter(value -> !value.isBlank()).map(value -> "Bearer " + value.trim());
+  }
+
+  /**
+   * The {@code Authorization} the control socket last dialled with — the project token, or the
+   * bearer minted for qits-projects' audience. Empty until the first mint, and on the anonymous
+   * developer topology.
+   */
+  private volatile Optional<String> controlAuthorization = Optional.empty();
+
+  /**
+   * What every tunnel dial-back carries: the project token when there is one, otherwise the same
+   * minted bearer the control socket dialled with, so an internal dial-back is never anonymous
+   * either. Never mints by itself — the dial-back follows an {@code OpenStream} that arrived over a
+   * socket that already presented this bearer.
+   */
+  Optional<String> dialBackAuthorization() {
+    Optional<String> bearer = bearer();
+    return bearer.isPresent() ? bearer : controlAuthorization;
+  }
+
+  /**
+   * The control socket's {@code Authorization}, without blocking the Vert.x event loop, remembered
+   * for {@link #dialBackAuthorization()}.
+   *
+   * <p>The project token wins outright: present, it is the header and nothing is minted. Absent,
+   * the commissioned pair is exchanged for a machine token by {@code client_secret_post} — the
+   * client id and secret in the form body, no {@code Basic} header, because the edge eats a {@code
+   * Basic} header rather than forwarding it (qits-625 made the same switch). Absent configuration
+   * keeps the clone-alone/developer topology anonymous; a partial configuration fails closed and is
+   * retried with the socket.
+   */
+  java.util.concurrent.CompletableFuture<Optional<String>> authorization() {
+    return authorization(authAudience)
+        .thenApply(
+            authorization -> {
+              controlAuthorization = authorization;
+              return authorization;
+            });
+  }
+
+  /**
+   * The {@code Authorization} for {@code audience} — the control socket's, or the boot clone's
+   * against qits-githost. The project token, when set, answers for every audience: it is one
+   * credential the edge accepts for every platform host.
+   */
+  java.util.concurrent.CompletableFuture<Optional<String>> authorization(
       Optional<String> audience) {
+    Optional<String> bearer = bearer();
+    if (bearer.isPresent()) {
+      return java.util.concurrent.CompletableFuture.completedFuture(bearer);
+    }
     boolean any =
         commissionedClientId.isPresent()
             || commissionedClientSecret.isPresent()
@@ -723,18 +803,16 @@ public class ControlSocket {
     }
     HttpRequest request;
     try {
-      String basic =
-          Base64.getEncoder()
-              .encodeToString(
-                  (commissionedClientId.get() + ":" + commissionedClientSecret.get())
-                      .getBytes(StandardCharsets.UTF_8));
       String form =
-          "grant_type=client_credentials&audience="
+          "grant_type=client_credentials&client_id="
+              + URLEncoder.encode(commissionedClientId.get(), StandardCharsets.UTF_8)
+              + "&client_secret="
+              + URLEncoder.encode(commissionedClientSecret.get(), StandardCharsets.UTF_8)
+              + "&audience="
               + URLEncoder.encode(audience.get(), StandardCharsets.UTF_8);
       request =
           HttpRequest.newBuilder(URI.create(authTokenUrl.get()))
               .timeout(Duration.ofSeconds(5))
-              .header("Authorization", "Basic " + basic)
               .header("Content-Type", "application/x-www-form-urlencoded")
               .POST(HttpRequest.BodyPublishers.ofString(form))
               .build();

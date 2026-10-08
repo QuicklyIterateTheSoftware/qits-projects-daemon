@@ -4,11 +4,11 @@ import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.WebSocket;
 import io.vertx.core.http.WebSocketClient;
-import io.vertx.core.http.WebSocketClientOptions;
-import io.vertx.core.http.WebSocketConnectOptions;
 import io.vertx.core.net.NetClient;
 import io.vertx.core.net.NetSocket;
 import java.net.URI;
+import java.util.Optional;
+import java.util.function.Supplier;
 import org.jboss.logging.Logger;
 
 /**
@@ -57,18 +57,36 @@ final class DaemonStreamTunnel {
   /** The loopback port {@link ProjectsApi} binds. */
   private final int apiPort;
 
+  /**
+   * The {@code Authorization} header each dial-back carries, read at dial time — {@code Bearer
+   * <project token>} on a runner-placed container, otherwise the bearer the control socket last
+   * minted, and empty on the anonymous developer topology. A supplier rather than a value because
+   * the minted bearer exists only once the control socket has dialled. Handed in by {@link
+   * ControlSocket}, which is the one place the token is read.
+   */
+  private final Supplier<Optional<String>> authorization;
+
   private volatile WebSocketClient client;
   private volatile NetClient netClient;
 
   DaemonStreamTunnel(Vertx vertx, String controlSocketUrl, int apiPort) {
+    this(vertx, controlSocketUrl, Optional::empty, apiPort);
+  }
+
+  DaemonStreamTunnel(
+      Vertx vertx,
+      String controlSocketUrl,
+      Supplier<Optional<String>> authorization,
+      int apiPort) {
     this.vertx = vertx;
     this.controlSocketUrl = controlSocketUrl;
+    this.authorization = authorization == null ? Optional::empty : authorization;
     this.apiPort = apiPort;
   }
 
   void start() {
     client =
-        vertx.createWebSocketClient(new WebSocketClientOptions().setMaxConnections(MAX_TUNNELS));
+        vertx.createWebSocketClient(DaemonDial.clientOptions().setMaxConnections(MAX_TUNNELS));
     netClient = vertx.createNetClient();
   }
 
@@ -99,7 +117,8 @@ final class DaemonStreamTunnel {
       LOG.warnf("refusing a stream dial-back path: %s", refused.getMessage());
       return;
     }
-    int port = dial.getPort() == -1 ? 80 : dial.getPort();
+    Optional<String> header = authorization.get();
+    Optional<String> bearer = header == null ? Optional.empty() : header;
     // The loopback connection first, and the dial-back second. Reversed, the host can start writing
     // the moment the upgrade completes — before this side has anywhere to put the bytes — and losing
     // the request line presents as a request that is simply never answered.
@@ -107,11 +126,10 @@ final class DaemonStreamTunnel {
         .onFailure(t -> LOG.debugf("stream %s could not reach the local API: %s", nonce, t))
         .onSuccess(
             local ->
-                ws.connect(
-                        new WebSocketConnectOptions()
-                            .setHost(dial.getHost())
-                            .setPort(port)
-                            .setURI(dial.getRawPath()))
+                // The nonce in the path names (and authorises) the stream to qits; the bearer is
+                // what lets the dial-back pass the edge at all on a runner-placed container. TLS
+                // and the port follow the scheme, as on the control socket.
+                ws.connect(DaemonDial.connectOptions(dial, bearer))
                     .onFailure(
                         t -> {
                           LOG.debugf("stream %s could not dial home: %s", nonce, String.valueOf(t));

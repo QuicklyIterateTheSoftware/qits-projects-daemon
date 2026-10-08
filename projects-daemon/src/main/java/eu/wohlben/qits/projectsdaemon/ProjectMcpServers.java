@@ -8,6 +8,7 @@ import eu.wohlben.qits.agents.McpEndpoints;
 import eu.wohlben.qits.agents.ScopedMcp;
 import eu.wohlben.qits.commands.InvalidCommandRequestException;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -92,9 +93,31 @@ final class ProjectMcpServers implements AgentMcpServers {
   private final McpEndpoints endpoints;
   private final String repoName;
 
+  /**
+   * {@code Authorization: Bearer <token>}, or empty, computed once from {@code
+   * qits.projects-daemon.token} (the same {@code QITS_TOKEN} {@code ControlSocket} dials home with)
+   * and attached to both platform servers this class builds, {@code repository} and {@code qits}.
+   * See {@link #platformHeaders()}.
+   */
+  private final Map<String, String> platformHeaders;
+
   ProjectMcpServers(McpEndpoints endpoints, String repoName) {
+    this(endpoints, repoName, Optional.empty());
+  }
+
+  ProjectMcpServers(McpEndpoints endpoints, String repoName, Optional<String> token) {
     this.endpoints = endpoints;
     this.repoName = repoName;
+    this.platformHeaders = headersFor(token);
+  }
+
+  private static Map<String, String> headersFor(Optional<String> token) {
+    return token == null
+        ? Map.of()
+        : token
+            .filter(value -> !value.isBlank())
+            .map(value -> Map.of("Authorization", "Bearer " + value.trim()))
+            .orElse(Map.of());
   }
 
   @Override
@@ -108,7 +131,8 @@ final class ProjectMcpServers implements AgentMcpServers {
               new ScopedMcp(
                   DaemonMcpEndpoints.REPOSITORY_SERVER,
                   base + "?projectId=" + projectId(),
-                  READ_ONLY_REPOSITORY_TOOLS));
+                  READ_ONLY_REPOSITORY_TOOLS,
+                  platformHeaders));
       // Narrowed to the one repository this container checked out, so a per-repository session
       // does not see its siblings.
       case REPOSITORY ->
@@ -116,7 +140,8 @@ final class ProjectMcpServers implements AgentMcpServers {
               new ScopedMcp(
                   DaemonMcpEndpoints.REPOSITORY_SERVER,
                   base + "?projectId=" + projectId() + "&repositoryId=" + repositoryId(),
-                  READ_ONLY_REPOSITORY_TOOLS));
+                  READ_ONLY_REPOSITORY_TOOLS,
+                  platformHeaders));
       // Not reachable from this host: there is no actions server on the project's segment, so a
       // launch that asks for it must be refused rather than quietly served the repository one.
       case ACTIONS ->
@@ -166,7 +191,8 @@ final class ProjectMcpServers implements AgentMcpServers {
             new ScopedMcp(
                 DaemonMcpEndpoints.PLATFORM_SERVER,
                 endpoints.mcpUrl(DaemonMcpEndpoints.PLATFORM_SERVER),
-                QITS_TOOLS));
+                QITS_TOOLS,
+                platformHeaders));
       } catch (InvalidCommandRequestException noAddressConfigured) {
         return Optional.empty();
       }
@@ -195,7 +221,24 @@ final class ProjectMcpServers implements AgentMcpServers {
     }
     return Optional.of(
         new ScopedMcp(
-            DaemonMcpEndpoints.REPOSITORY_SERVER, url.toString(), READ_ONLY_REPOSITORY_TOOLS));
+            DaemonMcpEndpoints.REPOSITORY_SERVER,
+            url.toString(),
+            READ_ONLY_REPOSITORY_TOOLS,
+            platformHeaders));
+  }
+
+  /**
+   * {@code Authorization: Bearer <token>} when this container was handed a {@code QITS_TOKEN},
+   * empty otherwise. On a runner-placed container the agent reaches qits-projects and the central
+   * {@code qits} server only through the edge, which wants a credential on every call. Attached
+   * directly to the {@code repository} and {@code qits} servers above rather than read by the
+   * library: {@link AgentMcpServers#platformHeaders} says the host attaches these itself. Empty
+   * headers render exactly what this host rendered before, which is what keeps the token-less
+   * launch byte for byte unchanged.
+   */
+  @Override
+  public Map<String, String> platformHeaders() {
+    return platformHeaders;
   }
 
   /** Yes: {@link #serverFor} builds the url the document asked for, or refuses. */
