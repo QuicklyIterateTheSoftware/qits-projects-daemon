@@ -43,6 +43,8 @@ library declares:
     AgentConfigurationBoot  materializing the per-surface configuration document at boot
     CheckoutFollower        supervising `qits checkout-daemon`, which holds /workspace at what the
                             repositories released; started after the boot provision and the API
+    FrontDeskKeeper         keeping the project.work front desk running when the lifecycle is ALWAYS_ON;
+                            started after the follower, only on a successful provision with agents wired
 
 Both library modules are framework-free — no CDI, no JAX-RS, no Jackson — so they cannot read
 configuration. `ControlSocket` is the single reader and hands every setting down as a constructor
@@ -398,8 +400,12 @@ derive fails at the boundary instead of far from it.
                                          control socket, every dial-back, the clone's git header and the repository/qits
                                          MCP servers, and NOTHING is minted; absent ⇒ the pair above (client_secret_post)
     QITS_TOKEN_SUBJECT                   whom that token names; read for the boot log only
-    QITS_PROJECTS_DAEMON_LIFECYCLE       ALWAYS_ON | ON_DEMAND (default); ALWAYS_ON keeps a project.work front-desk
-                                         session running (the always-on session — not read until that lands)
+    QITS_PROJECTS_DAEMON_LIFECYCLE       ALWAYS_ON | ON_DEMAND (default; anything else ⇒ one WARN, ON_DEMAND);
+                                         ALWAYS_ON keeps a project.work front-desk session running (FrontDeskKeeper):
+                                         launched at boot unless one is live, relaunched on exit (5 s doubling to
+                                         5 min, reset after 10 min up, never gives up), resuming the previous
+                                         session while its transcript exists; not signed in ⇒ a DaemonLog WARN and
+                                         a retry every 5 min, never a sign-in terminal
 
 `QITS_REPOSITORY_MCP_URL` and `QITS_PLATFORM_MCP_URL` are two of the odd names out — no
 `QITS_PROJECTS_DAEMON_` prefix — because they are the existing `qits.repository-mcp.url` /

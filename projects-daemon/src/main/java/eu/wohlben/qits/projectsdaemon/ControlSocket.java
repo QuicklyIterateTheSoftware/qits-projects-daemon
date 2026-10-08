@@ -239,6 +239,14 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.projects-daemon.checkout-follow", defaultValue = "true")
   boolean checkoutFollow;
 
+  /**
+   * Whether this container keeps a {@code project.work} front desk running ({@code
+   * QITS_PROJECTS_DAEMON_LIFECYCLE}): {@code ALWAYS_ON} or {@code ON_DEMAND}, the default. Anything
+   * else logs one WARN and counts as {@code ON_DEMAND}. See {@link FrontDeskKeeper}.
+   */
+  @ConfigProperty(name = "qits.projects-daemon.lifecycle")
+  Optional<String> lifecycle;
+
   /** Whether launches wire the turn-boundary activity hooks; the lineage hook is unconditional. */
   @ConfigProperty(name = "qits.agent.activity-tracking-enabled", defaultValue = "true")
   boolean agentActivityTrackingEnabled;
@@ -338,6 +346,13 @@ public class ControlSocket {
    * the process lifetime. Package-private for the same reason {@link #provisioned} is.
    */
   volatile CheckoutFollower checkoutFollower;
+
+  /**
+   * The front-desk keeper {@link #wireAgents} built over the wired launch service, started by
+   * {@link #keepFrontDesk()} once the provision succeeded. Null when the agent surface stayed
+   * unwired. Package-private for the same reason {@link #provisioned} is.
+   */
+  volatile FrontDeskKeeper frontDesk;
 
   /**
    * The live terminal and chat sessions {@link #wireCapabilities} spawns — held so {@link #stop}
@@ -461,6 +476,8 @@ public class ControlSocket {
           // After the API is wired, never before: the loopback surface must not wait on a
           // subprocess, and a container whose clone failed has no checkout to hold.
           followCheckout();
+          // Last: a desk needs both the checkout and the wired agent surface.
+          keepFrontDesk();
         });
   }
 
@@ -499,6 +516,23 @@ public class ControlSocket {
       follower.start();
     } catch (RuntimeException e) {
       LOG.warnf("The checkout follower did not start: %s", e.getMessage());
+    }
+  }
+
+  /**
+   * Start the {@link FrontDeskKeeper} — but only when the boot provision produced a checkout and
+   * {@link #wireAgents} wired a launch service; it is itself a no-op unless the lifecycle is {@code
+   * ALWAYS_ON}. Never throws, for the same reason {@link #followCheckout()} does not.
+   */
+  void keepFrontDesk() {
+    FrontDeskKeeper keeper = frontDesk;
+    if (!provisioned || keeper == null) {
+      return;
+    }
+    try {
+      keeper.start();
+    } catch (RuntimeException e) {
+      LOG.warnf("The front desk keeper did not start: %s", e.getMessage());
     }
   }
 
@@ -608,6 +642,14 @@ public class ControlSocket {
     if (h != null) {
       h.setAgentLaunch(launch);
     }
+    frontDesk =
+        new FrontDeskKeeper(
+            FrontDeskKeeper.Lifecycle.parse(lifecycle),
+            FrontDeskKeeper.Desk.of(launch, store, commandRegistry, claudeMount),
+            FrontDeskKeeper.Timing.DEFAULT,
+            FrontDeskKeeper.Scheduler.worker(),
+            System::currentTimeMillis,
+            this::send);
     projectsApi.wireAgents(
         launch,
         new AgentSessionQueryService(store, agentSessionStore),
@@ -965,6 +1007,12 @@ public class ControlSocket {
 
   @PreDestroy
   void stop() {
+    // The keeper stops supervising before the agents are terminated, so the SIGTERM below is not
+    // read as a crash to relaunch from.
+    FrontDeskKeeper keeper = frontDesk;
+    if (keeper != null) {
+      keeper.stop();
+    }
     // Agents go first, before anything else is torn down — see stopAgents for why.
     stopAgents(commands);
     // Then the checkout follower, because it owns a child process: stopping supervision before the
