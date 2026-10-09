@@ -407,6 +407,19 @@ derive fails at the boundary instead of far from it.
                                          session while its transcript exists; not signed in ⇒ a DaemonLog WARN and
                                          a retry every 5 min, never a sign-in terminal
 
+**The front desk refreshes the claude.ai token before every launch** (qits-1102, `ClaudeTokenPreflight`).
+`claude --remote-control` connects Remote Control once, at startup, on whatever access token
+`$CLAUDE_CONFIG_DIR/.credentials.json` holds (else `<claude-mount>/.claude/`), and never retries; the
+model refreshes an expired token on its first call, Remote Control does not, so a desk launched on a
+stale token sits at "Remote Control failed · /login" for good. So before the boot launch and every
+relaunch the keeper reads `claudeAiOauth.expiresAt` and, when it is missing, unreadable or within
+5 min of now, runs `claude -p --model haiku --max-turns 1 --tools "" --strict-mcp-config
+--no-session-persistence ok` with the launch's `HOME` (90 s cap, output discarded), then re-reads the
+expiry: INFO "refreshed … (valid until …)", or WARN and launch anyway. The official client does the
+refresh because the refresh token rotates and the file is shared by every container — never refresh
+it by hand. `claude auth status` is not a substitute: the library runs it before every launch and
+it left the token expired in the incident; `--bare` never reads OAuth at all. No token value is logged.
+
 `QITS_REPOSITORY_MCP_URL` and `QITS_PLATFORM_MCP_URL` are two of the odd names out — no
 `QITS_PROJECTS_DAEMON_` prefix — because they are the existing `qits.repository-mcp.url` /
 `qits.platform-mcp.url` keys, the same spellings the workspace daemon uses for its own MCP servers.

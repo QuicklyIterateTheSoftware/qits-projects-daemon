@@ -45,6 +45,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Optional;
 import java.util.Queue;
@@ -645,7 +646,17 @@ public class ControlSocket {
     frontDesk =
         new FrontDeskKeeper(
             FrontDeskKeeper.Lifecycle.parse(lifecycle),
-            FrontDeskKeeper.Desk.of(launch, store, commandRegistry, claudeMount),
+            FrontDeskKeeper.Desk.of(
+                launch,
+                store,
+                commandRegistry,
+                claudeMount,
+                // The launch inherits this process's environment, CLAUDE_CONFIG_DIR included.
+                ClaudeTokenPreflight.of(
+                    processes,
+                    claudeMount,
+                    System.getenv("CLAUDE_CONFIG_DIR"),
+                    Path.of(System.getProperty("java.io.tmpdir")))),
             FrontDeskKeeper.Timing.DEFAULT,
             FrontDeskKeeper.Scheduler.worker(),
             System::currentTimeMillis,

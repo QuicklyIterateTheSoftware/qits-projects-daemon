@@ -93,6 +93,16 @@ class FrontDeskKeeperTest {
     boolean signedIn = true;
     boolean foreignLive;
     boolean transcriptPresent = true;
+    final List<Long> refreshTimes = new ArrayList<>();
+    boolean refreshThrows;
+
+    @Override
+    public void refreshCredentials() {
+      refreshTimes.add(now);
+      if (refreshThrows) {
+        throw new IllegalStateException("preflight blew up");
+      }
+    }
 
     @Override
     public Command launch(AgentLaunchRequest request) {
@@ -281,6 +291,36 @@ class FrontDeskKeeperTest {
     desk.signedIn = true;
     advance(TIMING.notSignedInRetryMs());
     assertEquals(1, desk.launches.size(), "launches once somebody signed in");
+  }
+
+  @Test
+  void theTokenIsRefreshedBeforeEveryLaunchBootAndRelaunch() {
+    keeper(Lifecycle.ALWAYS_ON).start();
+    advance(0);
+    assertEquals(List.of(now), desk.refreshTimes, "refreshed right before the boot launch");
+
+    desk.exitLast(1);
+    advance(TIMING.pollMs() + TIMING.initialBackoffMs());
+    assertEquals(2, desk.launches.size());
+    assertEquals(2, desk.refreshTimes.size(), "and again before the relaunch");
+    assertEquals(desk.launchTimes.getLast(), desk.refreshTimes.getLast());
+  }
+
+  @Test
+  void noRefreshWhileSomebodyElsesDeskIsLive() {
+    desk.foreignLive = true;
+    keeper(Lifecycle.ALWAYS_ON).start();
+    advance(TIMING.resetAfterMs());
+    assertTrue(desk.refreshTimes.isEmpty(), "nothing to launch, nothing to refresh");
+  }
+
+  @Test
+  void aFailingPreflightStillLaunches() {
+    desk.refreshThrows = true;
+    keeper(Lifecycle.ALWAYS_ON).start();
+    advance(0);
+    assertEquals(1, desk.refreshTimes.size());
+    assertEquals(1, desk.launches.size(), "a preflight failure never holds the desk back");
   }
 
   @Test

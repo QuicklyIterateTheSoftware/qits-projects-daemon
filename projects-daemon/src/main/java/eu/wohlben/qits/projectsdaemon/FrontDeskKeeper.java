@@ -46,6 +46,10 @@ import org.jboss.logging.Logger;
  *       gives up: a desk that stops coming back is the failure this class exists to remove.
  *   <li><b>Resume:</b> a relaunch continues the previous keeper session while its transcript still
  *       exists, so the remote-control thread survives a crash of its process.
+ *   <li><b>Fresh token:</b> before every launch the claude.ai access token on the credential
+ *       volume is refreshed through {@code claude} itself when it is missing, unreadable or within
+ *       5 min of expiry ({@link ClaudeTokenPreflight}), because Remote Control connects only at
+ *       startup and never retries. A failed preflight is logged and the launch goes ahead.
  *   <li><b>Not signed in</b> is not a crash to back off from: it says so once per attempt as a
  *       {@link DaemonLog} WARN and asks again every 5 min. It never opens a sign-in terminal —
  *       signing in is a person's deliberate step on the runners page.
@@ -122,10 +126,25 @@ final class FrontDeskKeeper {
     /** Whether {@code sessionId}'s transcript is still on the credential volume. */
     boolean transcriptExists(Command command, String sessionId);
 
+    /**
+     * Make sure the claude.ai access token is fresh before a launch (qits-1102); see {@link
+     * ClaudeTokenPreflight}. Must not throw, but the keeper launches regardless if it does.
+     */
+    default void refreshCredentials() {}
+
     /** The production desk over this daemon's launch service, store and registry. */
     static Desk of(
-        AgentLaunchService launch, CommandStore store, CommandRegistry registry, String claudeMount) {
+        AgentLaunchService launch,
+        CommandStore store,
+        CommandRegistry registry,
+        String claudeMount,
+        ClaudeTokenPreflight preflight) {
       return new Desk() {
+        @Override
+        public void refreshCredentials() {
+          preflight.ensureFresh();
+        }
+
         @Override
         public Command launch(AgentLaunchRequest request) {
           return launch.launch(request);
@@ -253,6 +272,15 @@ final class FrontDeskKeeper {
       LOG.warnf("Could not ask for a live front desk session: %s", e.getMessage());
       scheduler.schedule(this::attempt, timing.pollMs());
       return;
+    }
+    try {
+      // Remote Control connects once, at startup, on whatever token the volume holds; a stale
+      // one leaves the desk at "Remote Control failed · /login" for good (qits-1102).
+      desk.refreshCredentials();
+    } catch (RuntimeException e) {
+      LOG.warnf(
+          "front desk: the claude.ai token preflight failed (%s); launching anyway",
+          e.getClass().getSimpleName());
     }
     String resume = resumableSession();
     Command command;
