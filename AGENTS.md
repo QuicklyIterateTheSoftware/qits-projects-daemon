@@ -176,8 +176,6 @@ went and the seams that consumed it were answered differently:
   and with it the `snakeyaml` dependency.
 - `BootstrapRunner` and the whole bootstrap chain: `RunBootstrap`, `BootstrapStep`,
   `BootstrapOutcome`, `Bootstrapped`, `/bootstrap-commands`.
-- `ServiceSupervisor` and dev-server supervision: `StartService`, `SignalService`,
-  `ServiceTransition`, `/services`, and the `QITS_PUBLIC_BASE` service-proxy base.
 - `DescribeConfig` / `ConfigView`.
 - `ConfigActionResolver` → `NoDeclaredActions`. The `ActionResolver` seam stays and answers empty,
   so `GET /commands/actions` returns `[]` and `POST /commands` answers 400 rather than 500 from a
