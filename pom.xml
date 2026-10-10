@@ -33,7 +33,7 @@
 
         <quarkus.platform.artifact-id>quarkus-bom</quarkus.platform.artifact-id>
         <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
-        <quarkus.platform.version>3.34.6</quarkus.platform.version>
+        <quarkus.platform.version>3.40.1</quarkus.platform.version>
 
         <compiler-plugin.version>3.15.0</compiler-plugin.version>
         <surefire-plugin.version>3.5.4</surefire-plugin.version>
@@ -51,7 +51,7 @@
 
         <!-- pact-jvm, for the contract tests (ticket qits-1149): the version every provider and
              consumer on the estate uses, so a pact is read the same way on both sides. -->
-        <pact.version>4.6.21</pact.version>
+        <pact.version>4.7.5</pact.version>
 
         <!-- The consumer half of the contracts (ticket qits-1149): the shared golden-master reader,
              and the provider recordings the daemon's pact rows are written against. Exact
