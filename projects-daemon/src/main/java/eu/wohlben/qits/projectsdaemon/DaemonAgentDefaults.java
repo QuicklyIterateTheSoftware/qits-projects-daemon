@@ -61,7 +61,7 @@ final class DaemonAgentDefaults implements AgentDefaults {
 
   /**
    * Empty: nothing in this container refines a prompt. {@code PromptRefinementService} is the
-   * workspace daemon's — a project agent drafts epics through the repository MCP server's tools, not
+   * workspace daemon's — a project agent drafts epics through the qits MCP server's tools, not
    * through a short non-interactive harness call — so the setting the library carries for that flow
    * has no reader here, and answering the harness's own choice is the honest empty rather than a
    * model name nobody would use.

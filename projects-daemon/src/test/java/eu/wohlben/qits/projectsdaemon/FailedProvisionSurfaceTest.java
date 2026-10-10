@@ -166,7 +166,6 @@ class FailedProvisionSurfaceTest {
     daemon.projectId = PROJECT_ID;
     daemon.repoName = REPO;
     daemon.url = Optional.of("ws://qits-projects:8080/projects/daemon/" + PROJECT_ID);
-    daemon.repositoryMcpUrl = Optional.empty();
     daemon.agentDefaultType = Optional.empty();
     daemon.agentActivityTrackingEnabled = false;
     daemon.transcriptTailPollMs = 500;

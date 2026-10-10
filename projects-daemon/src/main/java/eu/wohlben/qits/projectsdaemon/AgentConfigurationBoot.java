@@ -1,5 +1,8 @@
 package eu.wohlben.qits.projectsdaemon;
 
+import eu.wohlben.qits.agents.AgentConfigurationDocument;
+import eu.wohlben.qits.agents.AgentMcpAttachment;
+import eu.wohlben.qits.agents.AgentSurfaceConfiguration;
 import eu.wohlben.qits.agents.AgentSurfaceConfigurations;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -7,7 +10,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 import org.jboss.logging.Logger;
 
 /**
@@ -100,7 +107,62 @@ final class AgentConfigurationBoot {
     // thing every other host uses too.
     AgentSurfaceConfigurations configurations = AgentSurfaceConfigurations.readFrom(file.toString());
     LOG.infof("Agent configuration materialized at %s", file);
-    return configurations;
+    return withoutRetiredServers(configurations);
+  }
+
+  /**
+   * The per-service MCP servers retired by qits-1174. Stored surfaces still attach them until
+   * qits-projects cleans its rows.
+   */
+  static final List<String> RETIRED_MCP_SERVERS = List.of("repository", "actions", "observability");
+
+  /**
+   * {@code configurations} with every attachment of a retired server dropped. The pinned
+   * qits-coding-agents refuses a launch whose surface attaches a server this daemon does not serve,
+   * so a stale row would stop every launch. Remove once the pinned library is the qits-1174 release,
+   * which skips them itself.
+   */
+  static AgentSurfaceConfigurations withoutRetiredServers(
+      AgentSurfaceConfigurations configurations) {
+    return configurations
+        .document()
+        .map(
+            document ->
+                AgentSurfaceConfigurations.of(
+                    new AgentConfigurationDocument(
+                        document.version(),
+                        document.generatedAt(),
+                        document.surfaces().entrySet().stream()
+                            .collect(
+                                Collectors.toMap(
+                                    Map.Entry::getKey,
+                                    entry -> withoutRetiredServers(entry.getValue()))))))
+        .orElse(configurations);
+  }
+
+  private static AgentSurfaceConfiguration withoutRetiredServers(AgentSurfaceConfiguration surface) {
+    if (surface.mcpServers() == null) {
+      return surface;
+    }
+    List<AgentMcpAttachment> kept =
+        surface.mcpServers().stream()
+            .filter(
+                attachment ->
+                    !RETIRED_MCP_SERVERS.contains(attachment.server().toLowerCase(Locale.ROOT)))
+            .toList();
+    return new AgentSurfaceConfiguration(
+        surface.surface(),
+        surface.harness(),
+        surface.model(),
+        surface.effort(),
+        surface.remoteControl(),
+        surface.permissionMode(),
+        surface.activityTracking(),
+        surface.systemPrompt(),
+        surface.initialPrompt(),
+        kept,
+        surface.externalMcpServers(),
+        surface.shipped());
   }
 
   private static Path write(String target, String bytes) {

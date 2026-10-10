@@ -98,10 +98,8 @@ public class ControlSocket {
    * Full dial-home URL qits-projects injected, e.g. {@code
    * ws://qits-projects:8080/projects/daemon/<projectId>}.
    *
-   * <p>The daemon reaches two other hosts from this one address: the git host for the self-clone
-   * ({@link Provisioner}) and the MCP server for agent launches ({@link DaemonMcpEndpoints}). Only
-   * the second is derivable — that server is qits-projects, the same service this url points at.
-   * The git host is qits-artifacts, so the Provisioner's fallback is a guess and says so.
+   * <p>The git host for the self-clone ({@link Provisioner}) falls back on this address. The git
+   * host is not this service, so that fallback is a guess and says so.
    */
   @ConfigProperty(name = "qits.projects-daemon.url")
   Optional<String> url;
@@ -256,19 +254,9 @@ public class ControlSocket {
   long transcriptTailPollMs;
 
   /**
-   * Explicit MCP base URL for the {@code repository} server. Unlike the workspace daemon's three
-   * overrides, this one is not a correction for a guess — the derivation is provably right, because
-   * the control socket and that server are the same service. It points an agent at a different qits
-   * instance, or at a separately deployed MCP server if that ever splits out.
-   */
-  @ConfigProperty(name = "qits.repository-mcp.url")
-  Optional<String> repositoryMcpUrl;
-
-  /**
-   * Explicit MCP base URL for the central platform-access {@code qits} server (qits-630). Unlike
-   * {@link #repositoryMcpUrl}, there is no derivation to fall back to — it is a separately deployed
-   * service with no relationship to this daemon's dial-home address — so unset simply means the
-   * server is not attached, the same as a surface whose configuration never asked for it.
+   * The url of the central platform-access {@code qits} MCP server (qits-630), the one platform
+   * server an agent gets. There is nothing to derive it from — it is a separately deployed service —
+   * so unset means no server is attached.
    */
   @ConfigProperty(name = "qits.platform-mcp.url")
   Optional<String> platformMcpUrl;
@@ -560,10 +548,6 @@ public class ControlSocket {
    * browser refetches the Commands list when something lands rather than at the next poll. The
    * transcript sweep uses the same callback.
    *
-   * <p>A daemon with no dial-home url cannot derive the MCP endpoint an agent would be launched
-   * with — but it also never connected, so it is not serving this API either. The agent surface is
-   * then left unwired and answers 503.
-   *
    * <p>Package-private so a test can wire and serve without a provision, which is the case this
    * whole method now has to survive.
    */
@@ -601,14 +585,6 @@ public class ControlSocket {
             agentActivityTrackingEnabled,
             surfaceConfigurations,
             DaemonAgentDefaults.factsOf(projectId, repoName));
-    DaemonMcpEndpoints endpoints;
-    try {
-      endpoints =
-          new DaemonMcpEndpoints(url.orElse(null), projectId, repositoryMcpUrl, platformMcpUrl);
-    } catch (IllegalStateException e) {
-      LOG.warnf("Coding agents stay unwired: %s", e.getMessage());
-      return;
-    }
     ProcessRunner processes = new LocalProcessExecutor();
     AgentTranscriptService transcripts =
         new AgentTranscriptService(
@@ -625,9 +601,8 @@ public class ControlSocket {
             transcripts,
             tail,
             defaults,
-            // The scope→server mapping is this daemon's, not the library's: one server, the
-            // repository one, project- or repository-narrowed. See ProjectMcpServers.
-            new ProjectMcpServers(endpoints, repoName, token),
+            // One platform server, qits. See ProjectMcpServers.
+            new ProjectMcpServers(platformMcpUrl, token),
             context,
             claudeMount,
             hooksPort,
@@ -679,8 +654,8 @@ public class ControlSocket {
    * reason.
    */
   static final String TASK_PROMPT_BOOTSTRAP =
-      "Fetch the current task prompt for this project with the taskPrompt tool, then implement what"
-          + " it describes.";
+      "Read the work item for this project with the qits MCP server's work_details tool, then"
+          + " implement what it describes.";
 
   /**
    * What the harnesses in this container's image can be configured with — probed <b>once, here, at

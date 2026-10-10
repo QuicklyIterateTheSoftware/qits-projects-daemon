@@ -37,9 +37,8 @@ The library's suite is where harness behaviour is proven now — this repository
 library declares:
 
     ProjectContext          extends the library's CheckoutContext with projectId/repoName
-    ProjectMcpServers       the scope→server mapping: ONE server, `repository`, narrowed here
+    ProjectMcpServers       the MCP servers a launch attaches: ONE, the central `qits` server
     DaemonAgentDefaults     the harness default, activity tracking, the mounted document, the facts
-    DaemonMcpEndpoints      where that server lives
     AgentConfigurationBoot  materializing the per-surface configuration document at boot
     CheckoutFollower        supervising `qits checkout-daemon`, which holds /workspace at what the
                             repositories released; started after the boot provision and the API
@@ -190,23 +189,20 @@ that nothing here **wires** it. The distinction matters: unwiring is a line, un-
 - `PromptRefinementService` and `POST /prompt-refinements`: no route. `refinementModel()` answers
   empty, and `qits.refinement.model` is not read.
 - `AgentPluginService`, `InstalledPluginDto` and `/agent-plugins`: no route.
-- `AgentMcpScope.ACTIONS` is in the library's enum (the union of two enums) and **refused** by
-  `ProjectMcpServers`: the `actions` server has no address on the project's segment and the
-  `observability` one is a different service, so a scope naming an unreachable server would only
-  fail at launch. This host serves `PROJECT` and `REPOSITORY`.
-- The action and observability pre-approval lists travel with each host's own mapping, so this one
-  carries `READ_ONLY_REPOSITORY_TOOLS` and nothing else.
+- The action and observability pre-approval lists are gone with their servers (qits-1174).
 
-**A launch attaches exactly one MCP server**, `repository`, and it is the one carrying the epic and
-ticket tools — the whole reason this container exists. Excluding the workspace world is deliberate: a
-project agent's job is the project's plan and the work beside it, not workspace actions or another
-service's telemetry. Nothing can put the others back at runtime either. Claude is launched with
+**A launch attaches exactly one MCP server**, `qits` — the central platform-access server, scoped by
+the caller's own bearer (qits-1174). The per-service `repository`, `observability` and `actions`
+servers are retired. Nothing can put them back at runtime: Claude is launched with
 `--strict-mcp-config`, so the rendered `--mcp-config` is the complete set and the shared
 `/claude-home` volume's own MCP entries are ignored; Kimi gets a launch-local `mcp.json` in a
 throwaway `KIMI_CODE_HOME`. Both are asserted in the **library's** suite, against this daemon's
-mapping reproduced there as the `ProjectHostMcpServers` fixture — the rendered command lines stay
-byte-for-byte asserted where the harness now lives, because a daemon can no longer prove harness
-behaviour in the same commit as a harness change.
+servers reproduced there as the `ProjectHostMcpServers` fixture.
+
+**Stored surfaces may still attach a retired server** until qits-projects cleans its rows. The
+pinned library refuses a launch whose surface attaches a server this daemon does not serve, so
+`AgentConfigurationBoot` drops those attachments at boot. Remove that once the pinned library is the
+qits-1174 release, which skips them itself.
 
 **Other.**
 
@@ -219,11 +215,10 @@ behaviour in the same commit as a harness change.
 
 ## The two axes of a launch
 
-A launch is steered and addressed separately, and the two are different values on
-`AgentLaunchRequest`. Folding them together would mean a surface could not be narrowed to a
-repository, or that narrowing to a repository quietly changed what the agent was for.
+A launch carries two values on `AgentLaunchRequest`. The scope no longer changes anything (the one
+MCP server is scoped by the caller's bearer); it stays because callers still send it.
 
-    scope     AgentMcpScope   PROJECT | REPOSITORY   how narrow the one MCP url is
+    scope     AgentMcpScope   PROJECT | REPOSITORY   still parsed, no longer used
     surface   AgentSurface    project.work           where in the product it started
 
 **The surface replaced the desk.** `AgentDesk` was a two-valued enum with its prompt inlined,
@@ -285,18 +280,9 @@ nothing here polls, and there is no staleness flag anywhere.
 
 ## The seams this daemon fills
 
-`ProjectMcpServers` is the one worth reading. It answers **both** halves of the library's
-`AgentMcpServers`:
-
-- `serversFor(scope)` — the scope→server mapping: one server, `repository`, at project scope or
-  narrowed to the one repository checked out. `ACTIONS` is refused rather than served the repository
-  server, because no actions server exists on the project's segment.
-- `serverFor(key, scope, narrowing)` — one server narrowed exactly as a surface's configuration
-  asks, in the canonical `projectId`, `repositoryId`, `workspaceId` order, with every id through
-  `AgentMcpIds.requireId`. A `workspace` narrowing is **refused**: there is no workspace here, and
-  answering for the whole project instead would be a session quietly wider than it was configured to
-  be. `honoursNarrowing()` is therefore true, so no launch records that its addressing was the
-  host's rather than the document's.
+`ProjectMcpServers` answers the library's `AgentMcpServers`: `serversFor(scope)` is the `qits`
+server when `QITS_PLATFORM_MCP_URL` is set, at every scope, and nothing otherwise. It carries the
+`QITS_TOKEN` bearer as a header when the container has one.
 
 `DaemonAgentDefaults` answers `refinementModel()` empty (nothing here refines a prompt — that is the
 workspace daemon's flow) and `ambientFacts()` with `project` and `repository`. `epic`, `workspace`
@@ -351,26 +337,17 @@ dispatch that "started an agent" which is actually a sign-in prompt is a green-w
 
 ## Derivations, and which ones are honest
 
-One address is derived from the url the container is handed; the other used to be and no longer is.
+No address is derived from the url the container is handed any more.
 
-- **The MCP server** (`DaemonMcpEndpoints`): the control socket and the `repository` MCP server are
-  both **qits-projects**. Same service, same authority — the derivation is a property of the
-  topology, not a guess. No WARN. It is nonetheless only the *fallback* now: qits-projects states
-  the address outright as `QITS_REPOSITORY_MCP_URL`, and a stated address beats a sound derivation
-  the day the MCP server stops being co-located. The derivation stays so a container created before
-  that env, or a daemon run by hand, still works.
 - **The git host** (`Provisioner`): the control socket is qits-projects, the git host is
   qits-githost. Different services, so there is nothing to derive. `QITS_PROJECTS_DAEMON_GIT_BASE`
   is stated on every container qits-projects creates, and unset now means a `DaemonLog` WARN plus
   `ProvisionFailed` — no clone. The old fallback (`<authority>/artifacts/git`) named the pre-split
   host, which serves no git at all, so it could only convert a missing setting into a connection
   error against the wrong service.
-- **The central platform MCP server** (`DaemonMcpEndpoints`, qits-630): `qits` is a separately
-  deployed service with no relationship whatsoever to the control socket's authority, so there is
-  nothing to derive and no fallback at all — unlike `repository` above. Unset simply means the
-  server is not attached to any launch, the same outcome as a surface whose configuration never
-  named it; `ProjectMcpServers.serverFor` is what turns the thrown
-  `InvalidCommandRequestException` into that quiet absence rather than a refused launch.
+- **The central platform MCP server** (`ProjectMcpServers`, qits-630): `qits` is a separately
+  deployed service with no relationship to the control socket's authority, so there is nothing to
+  derive. Unset means no server is attached to any launch.
 
 Keep that distinction if either moves. A warning on a sound derivation trains people to ignore
 warnings; a silent unsound one loses a whole class of misconfiguration; an address nothing can
@@ -390,13 +367,12 @@ derive fails at the boundary instead of far from it.
     QITS_PROJECTS_DAEMON_AUTH_TOKEN_URL  idp token endpoint for authenticated dial-home
     QITS_PROJECTS_DAEMON_AUTH_AUDIENCE   qits-projects' environment client id
     QITS_PROJECTS_DAEMON_GIT_AUTH_AUDIENCE qits-githost's environment client id
-    QITS_REPOSITORY_MCP_URL              the one repository MCP server a launch attaches; absent ⇒ derived
-    QITS_PLATFORM_MCP_URL                the central qits platform MCP server (qits-630); absent ⇒ not attached, NOTHING derived
+    QITS_PLATFORM_MCP_URL                the central qits platform MCP server, the one a launch attaches; absent ⇒ none, NOTHING derived
     QITS_COMMISSIONED_CLIENT_ID          this container's idp client; absent ⇒ anonymous dev dial
     QITS_COMMISSIONED_CLIENT_SECRET      its one-time secret
     QITS_TOKEN                           runner-placed (edge) container's project token; set ⇒ it is the bearer on the
-                                         control socket, every dial-back, the clone's git header and the repository/qits
-                                         MCP servers, and NOTHING is minted; absent ⇒ the pair above (client_secret_post)
+                                         control socket, every dial-back, the clone's git header and the qits
+                                         MCP server, and NOTHING is minted; absent ⇒ the pair above (client_secret_post)
     QITS_TOKEN_SUBJECT                   whom that token names; read for the boot log only
     QITS_PROJECTS_DAEMON_LIFECYCLE       ALWAYS_ON | ON_DEMAND (default; anything else ⇒ one WARN, ON_DEMAND);
                                          ALWAYS_ON keeps a project.work front-desk session running (FrontDeskKeeper):
@@ -418,12 +394,9 @@ refresh because the refresh token rotates and the file is shared by every contai
 it by hand. `claude auth status` is not a substitute: the library runs it before every launch and
 it left the token expired in the incident; `--bare` never reads OAuth at all. No token value is logged.
 
-`QITS_REPOSITORY_MCP_URL` and `QITS_PLATFORM_MCP_URL` are two of the odd names out — no
-`QITS_PROJECTS_DAEMON_` prefix — because they are the existing `qits.repository-mcp.url` /
-`qits.platform-mcp.url` keys, the same spellings the workspace daemon uses for its own MCP servers.
-qits-projects injects both on every container it creates. `QITS_REPOSITORY_MCP_URL` absent falls
-back to the derivation in `DaemonMcpEndpoints`; `QITS_PLATFORM_MCP_URL` absent has no derivation at
-all, so the `qits` server is simply not attached.
+`QITS_PLATFORM_MCP_URL` is one of the odd names out — no `QITS_PROJECTS_DAEMON_` prefix — because it
+is the existing `qits.platform-mcp.url` key, the same spelling the workspace daemon uses. qits-projects
+injects it on every container it creates; absent, the `qits` server is simply not attached.
 
 `QITS_TOKEN` and `QITS_TOKEN_SUBJECT` carry no prefix either, and for the same reason: they are the
 spellings qits-workspace-daemon already reads (qits-625), and the CLI's EDGE_TOKEN mode reads the

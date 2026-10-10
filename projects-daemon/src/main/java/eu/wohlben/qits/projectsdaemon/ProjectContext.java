@@ -17,8 +17,7 @@ import eu.wohlben.qits.commands.CheckoutContext;
  *
  * <p>The library therefore cannot tell a project agent container from a workspace one, which is
  * exactly what lets one jar serve both. What reads {@link #projectId()} and {@link #repoName()} is
- * this daemon: its response bodies ({@code CommandJson}) and its MCP narrowing ({@code
- * ProjectMcpServers}).
+ * this daemon: its response bodies ({@code CommandJson}).
  *
  * <p>None of these are lookups. The daemon is told its project at container creation, the wrapper
  * checkout is its own working directory, and the commit is read from that checkout.

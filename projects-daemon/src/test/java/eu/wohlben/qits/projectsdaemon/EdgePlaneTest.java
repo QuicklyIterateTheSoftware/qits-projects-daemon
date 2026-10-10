@@ -6,13 +6,12 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
-import eu.wohlben.qits.agents.AgentMcpNarrowing;
 import eu.wohlben.qits.agents.AgentMcpScope;
-import eu.wohlben.qits.agents.ScopedMcp;
 import io.vertx.core.http.WebSocketConnectOptions;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -175,42 +174,27 @@ class EdgePlaneTest {
   // ---- MCP --------------------------------------------------------------------
 
   @Test
-  void theTokenRidesBothPlatformMcpServers() {
+  void theTokenRidesTheQitsServer() {
     ProjectMcpServers servers =
-        new ProjectMcpServers(endpoints(), "qits-qits", Optional.of(TOKEN));
+        new ProjectMcpServers(Optional.of("https://mcp.qits.example.org/mcp"), Optional.of(TOKEN));
     Map<String, String> expected = Map.of("Authorization", BEARER);
 
     assertEquals(expected, servers.platformHeaders());
     assertEquals(expected, servers.serversFor(AgentMcpScope.PROJECT).getFirst().headers());
-    assertEquals(expected, servers.serversFor(AgentMcpScope.REPOSITORY).getFirst().headers());
-    AgentMcpNarrowing narrowing = new AgentMcpNarrowing(true, true, false);
-    ScopedMcp repository =
-        servers.serverFor("repository", AgentMcpScope.REPOSITORY, narrowing).orElseThrow();
-    ScopedMcp qits = servers.serverFor("qits", AgentMcpScope.REPOSITORY, narrowing).orElseThrow();
-    assertEquals(expected, repository.headers());
-    assertEquals(expected, qits.headers());
   }
 
   @Test
   void withoutTheTokenNoMcpServerCarriesHeaders() {
-    for (ProjectMcpServers servers :
-        new ProjectMcpServers[] {
-          new ProjectMcpServers(endpoints(), "qits-qits"),
-          new ProjectMcpServers(endpoints(), "qits-qits", Optional.empty()),
-          new ProjectMcpServers(endpoints(), "qits-qits", Optional.of(" ")),
-        }) {
+    for (Optional<String> token :
+        List.of(Optional.<String>empty(), Optional.of(" "))) {
+      ProjectMcpServers servers =
+          new ProjectMcpServers(Optional.of("https://mcp.qits.example.org/mcp"), token);
       assertEquals(Map.of(), servers.platformHeaders());
       assertEquals(Map.of(), servers.serversFor(AgentMcpScope.PROJECT).getFirst().headers());
-      assertEquals(
-          Map.of(),
-          servers
-              .serverFor("qits", AgentMcpScope.REPOSITORY, new AgentMcpNarrowing(false, false, false))
-              .orElseThrow()
-              .headers());
     }
   }
 
-  // ---- the checkout follower and the derived MCP base ---------------------------
+  // ---- the checkout follower ----------------------------------------------------
 
   @Test
   void theFollowerInjectsNoTokenUrlWhenNoneIsSet() {
@@ -223,22 +207,7 @@ class EdgePlaneTest {
     assertEquals("git.qits.example.org", derived.get("QITS_GIT_AUTH_HOST"));
   }
 
-  @Test
-  void anEdgeDialHomeUrlDerivesAnHttpsMcpBase() {
-    assertEquals(
-        "https://projects.qits.example.org",
-        DaemonMcpEndpoints.httpBaseOf("wss://projects.qits.example.org/projects/daemon/x"));
-  }
-
   // ---- fixtures -----------------------------------------------------------------
-
-  private static DaemonMcpEndpoints endpoints() {
-    return new DaemonMcpEndpoints(
-        "wss://projects.qits.example.org/projects/daemon/" + PROJECT,
-        PROJECT,
-        Optional.empty(),
-        Optional.of("https://mcp.qits.example.org/mcp"));
-  }
 
   private static ControlSocket anonymous() {
     ControlSocket socket = new ControlSocket();

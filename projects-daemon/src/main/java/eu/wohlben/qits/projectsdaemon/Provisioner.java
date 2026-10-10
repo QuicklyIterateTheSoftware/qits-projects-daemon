@@ -54,8 +54,7 @@ import java.util.function.Consumer;
  * creates. Unset used to derive the dial-home authority plus {@code /artifacts/git}, with a {@code
  * WARN}: a guess about a <em>different</em> service, and since the byte-plane split about a host
  * that serves no git at all. That bought nothing over naming the missing key, so it is gone — unset
- * now emits the {@link DaemonLog} {@code WARN} and refuses to clone. Contrast {@link
- * DaemonMcpEndpoints}, whose derivation stays because both ends really are qits-projects.
+ * now emits the {@link DaemonLog} {@code WARN} and refuses to clone.
  *
  * <p>Whatever prefix the base carries does <b>not</b> disturb relative submodule resolution. Git
  * treats the superproject's remote as a <em>directory</em> and {@code ../} replaces the

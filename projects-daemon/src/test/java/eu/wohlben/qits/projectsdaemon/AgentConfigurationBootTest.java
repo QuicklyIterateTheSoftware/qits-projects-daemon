@@ -5,8 +5,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.agents.AgentMcpAttachment;
 import eu.wohlben.qits.agents.AgentPermissionMode;
 import eu.wohlben.qits.agents.AgentSurface;
+import eu.wohlben.qits.agents.AgentSurfaceConfiguration;
 import eu.wohlben.qits.agents.AgentSurfaceConfigurations;
 import eu.wohlben.qits.agents.AgentType;
 import eu.wohlben.qits.agents.InvalidAgentConfigurationException;
@@ -83,6 +85,30 @@ class AgentConfigurationBootTest {
         // so a surface belonging to the workspace daemon proves the "unmentioned" case instead.
         configurations.resolve(AgentSurface.EPIC_CHAT, AgentType.CLAUDE, true).harness(),
         "a surface the document does not mention still launches, on the shipped default");
+  }
+
+  @Test
+  void aRetiredMcpServerIsDroppedAndTheRestKept() {
+    // qits-1174: stored surfaces still attach the retired servers, and the pinned library would
+    // refuse every such launch. qits stays.
+    String document =
+        DOCUMENT.replace(
+            "\"mcpServers\": []",
+            "\"mcpServers\": [{\"server\": \"repository\", \"readOnly\": true},"
+                + " {\"server\": \"observability\"}, {\"server\": \"qits\"}]");
+
+    AgentSurfaceConfigurations configurations =
+        AgentConfigurationBoot.materialize(
+            Optional.of(document), Optional.of(tempDir.resolve("c.json").toString()));
+
+    AgentSurfaceConfiguration work =
+        configurations.resolve(AgentSurface.PROJECT_WORK, AgentType.CLAUDE, true);
+    assertEquals(
+        java.util.List.of("qits"),
+        work.mcpServers().stream().map(AgentMcpAttachment::server).toList());
+    assertEquals(AgentType.KIMI, work.harness(), "everything else is kept as it was");
+    assertEquals("You are the front desk.", work.systemPrompt());
+    assertTrue(configurations.documentPresent());
   }
 
   @Test
