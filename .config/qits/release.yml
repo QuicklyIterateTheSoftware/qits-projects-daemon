@@ -19,6 +19,14 @@ artifacts:
   # where `makeBom` writes it — and checks on the last step that it reached the store.
   - { type: maven, name: "eu.wohlben.qits:qits-projects-daemon-protocol", path: projects-daemon-protocol, sbom: projects-daemon-protocol/target/sbom.json }
 
+# THE DAEMON'S RECORDED ANSWERS (ticket qits-1149). qits-projects reads `GET /agents/available`
+# through the reverse tunnel; GoldenMasterRecordingTest records what the daemon answers there into
+# golden-masters/, published as eu.wohlben.qits:qits-projects-daemon-golden-masters and
+# @qits/qits-projects-daemon-golden-masters for consumers to write their pacts against.
+contracts:
+  application: qits-projects-daemon
+  golden-masters: { from: golden-masters/, packages: [maven, npm] }
+
 # TWO IMAGES FROM ONE TREE, WHICH NO ARCHETYPE PUSHES. java-service's extractor refuses anything but
 # exactly one docker entry, and the second image is a different Dockerfile (`Dockerfile.projects`)
 # with two build-args the recipe does not pass — BASE, pinned to a CalVer of qits/workspace-base and

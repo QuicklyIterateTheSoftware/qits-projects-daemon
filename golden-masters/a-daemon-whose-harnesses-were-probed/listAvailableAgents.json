@@ -1,0 +1,46 @@
+{
+  "agents": [
+    "CLAUDE",
+    "KIMI"
+  ],
+  "defaultAgent": "CLAUDE",
+  "imageVersion": "2026.1001.120000",
+  "reportedBy": "project-agent/00000000-0000-4000-8000-000000000001",
+  "capabilities": [
+    {
+      "harness": "CLAUDE",
+      "harnessVersion": "2.1.0 (Claude Code)",
+      "models": [
+        "opus",
+        "sonnet",
+        "haiku",
+        "fable"
+      ],
+      "modelsEnumerated": false,
+      "effortSupported": true,
+      "effortLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "authenticated": true,
+      "authDetail": "Signed in.",
+      "probeFailed": false,
+      "probeDetail": ""
+    },
+    {
+      "harness": "KIMI",
+      "harnessVersion": "",
+      "models": [],
+      "modelsEnumerated": false,
+      "effortSupported": false,
+      "effortLevels": [],
+      "authenticated": false,
+      "authDetail": "Nobody has checked whether this harness is signed in.",
+      "probeFailed": true,
+      "probeDetail": "kimi is not installed in this image"
+    }
+  ]
+}

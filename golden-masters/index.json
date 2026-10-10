@@ -1,0 +1,30 @@
+{
+  "formatVersion": 1,
+  "provider": "qits-projects-daemon",
+  "states": [
+    {
+      "name": "a daemon whose harnesses were probed",
+      "slug": "a-daemon-whose-harnesses-were-probed",
+      "params": {
+        "apiToken": "daemon-api-token",
+        "projectId": "00000000-0000-4000-8000-000000000001"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "listAvailableAgents",
+          "method": "GET",
+          "path": "/projects/container/{projectId}/agents/available",
+          "status": 200,
+          "file": "a-daemon-whose-harnesses-were-probed/listAvailableAgents.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    }
+  ]
+}

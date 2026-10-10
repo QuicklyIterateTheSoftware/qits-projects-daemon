@@ -49,6 +49,10 @@
              carrying neither key would have been guessed. -->
         <qits-coding-agents.version>2026.1010.72418</qits-coding-agents.version>
 
+        <!-- pact-jvm, for the contract tests (ticket qits-1149): the version every provider and
+             consumer on the estate uses, so a pact is read the same way on both sides. -->
+        <pact.version>4.6.21</pact.version>
+
         <!-- Where the platform publishes it. Overridden by CI (-Dqits.maven.repository.url), derived
              from QITS_DOMAIN; the default below is the public host. -->
         <qits.maven.repository.url>https://registry.qits.wohlben.eu/artifacts/maven/maven</qits.maven.repository.url>
