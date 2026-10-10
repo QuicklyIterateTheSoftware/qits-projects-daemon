@@ -26,6 +26,10 @@ artifacts:
 contracts:
   application: qits-projects-daemon
   golden-masters: { from: golden-masters/, packages: [maven, npm] }
+  # THE DAEMON'S OWN PACTS (ticket qits-1149): what it asks qits-idp, written by
+  # consumer/IdpConsumerPactTest into pacts/qits-projects-daemon_qits-idp-service.json.
+  pacts:
+    qits-idp-service: { packages: [maven] }
 
 # TWO IMAGES FROM ONE TREE, WHICH NO ARCHETYPE PUSHES. java-service's extractor refuses anything but
 # exactly one docker entry, and the second image is a different Dockerfile (`Dockerfile.projects`)

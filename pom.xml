@@ -53,6 +53,12 @@
              consumer on the estate uses, so a pact is read the same way on both sides. -->
         <pact.version>4.6.21</pact.version>
 
+        <!-- The consumer half of the contracts (ticket qits-1149): the shared golden-master reader,
+             and the provider recordings the daemon's pact rows are written against. Exact
+             versions: a new recording is a contract change, adopted on purpose. -->
+        <qits-pact-consumer.version>2026.1010.140259</qits-pact-consumer.version>
+        <qits-idp-golden-masters.version>2026.1010.134259</qits-idp-golden-masters.version>
+
         <!-- Where the platform publishes it. Overridden by CI (-Dqits.maven.repository.url), derived
              from QITS_DOMAIN; the default below is the public host. -->
         <qits.maven.repository.url>https://registry.qits.wohlben.eu/artifacts/maven/maven</qits.maven.repository.url>

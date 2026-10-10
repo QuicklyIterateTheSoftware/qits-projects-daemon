@@ -97,6 +97,20 @@
             <version>${pact.version}</version>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <!-- consumer/: reads qits-idp's golden masters and turns them into pact rows. -->
+            <groupId>eu.wohlben.qits</groupId>
+            <artifactId>qits-pact-consumer</artifactId>
+            <version>${qits-pact-consumer.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <!-- consumer/: what qits-idp answers, per provider state. -->
+            <groupId>eu.wohlben.qits</groupId>
+            <artifactId>qits-idp-golden-masters</artifactId>
+            <version>${qits-idp-golden-masters.version}</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
