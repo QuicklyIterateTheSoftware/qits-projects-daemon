@@ -88,27 +88,25 @@ class AgentConfigurationBootTest {
   }
 
   @Test
-  void aRetiredMcpServerIsDroppedAndTheRestKept() {
-    // qits-1174: stored surfaces still attach the retired servers, and the pinned library would
-    // refuse every such launch. qits stays.
+  void aStoredRetiredMcpServerStillBoots() {
+    // qits-1174: stored surfaces may still attach a retired server. The library reads them and
+    // skips them at launch, so the boot keeps the document as it came.
     String document =
         DOCUMENT.replace(
             "\"mcpServers\": []",
             "\"mcpServers\": [{\"server\": \"repository\", \"readOnly\": true},"
-                + " {\"server\": \"observability\"}, {\"server\": \"qits\"}]");
+                + " {\"server\": \"qits\"}]");
 
     AgentSurfaceConfigurations configurations =
         AgentConfigurationBoot.materialize(
             Optional.of(document), Optional.of(tempDir.resolve("c.json").toString()));
 
-    AgentSurfaceConfiguration work =
-        configurations.resolve(AgentSurface.PROJECT_WORK, AgentType.CLAUDE, true);
     assertEquals(
-        java.util.List.of("qits"),
-        work.mcpServers().stream().map(AgentMcpAttachment::server).toList());
-    assertEquals(AgentType.KIMI, work.harness(), "everything else is kept as it was");
-    assertEquals("You are the front desk.", work.systemPrompt());
-    assertTrue(configurations.documentPresent());
+        java.util.List.of("repository", "qits"),
+        configurations.resolve(AgentSurface.PROJECT_WORK, AgentType.CLAUDE, true).mcpServers()
+            .stream()
+            .map(AgentMcpAttachment::server)
+            .toList());
   }
 
   @Test

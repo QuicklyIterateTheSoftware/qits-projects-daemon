@@ -199,10 +199,8 @@ servers are retired. Nothing can put them back at runtime: Claude is launched wi
 throwaway `KIMI_CODE_HOME`. Both are asserted in the **library's** suite, against this daemon's
 servers reproduced there as the `ProjectHostMcpServers` fixture.
 
-**Stored surfaces may still attach a retired server** until qits-projects cleans its rows. The
-pinned library refuses a launch whose surface attaches a server this daemon does not serve, so
-`AgentConfigurationBoot` drops those attachments at boot. Remove that once the pinned library is the
-qits-1174 release, which skips them itself.
+**Stored surfaces may still attach a retired server.** The pinned library skips it at launch and
+notes that in the launch record, so the boot reads the document as it came.
 
 **Other.**
 

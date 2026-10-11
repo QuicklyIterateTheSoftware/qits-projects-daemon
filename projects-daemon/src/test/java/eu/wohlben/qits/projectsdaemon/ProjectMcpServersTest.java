@@ -1,6 +1,7 @@
 package eu.wohlben.qits.projectsdaemon;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import eu.wohlben.qits.agents.AgentMcpScope;
@@ -32,11 +33,13 @@ class ProjectMcpServersTest {
   void theRetiredServersAreNotServed() {
     ProjectMcpServers servers = new ProjectMcpServers(Optional.of(PLATFORM_URL), Optional.empty());
 
-    for (String retired : List.of("repository", "observability", "actions")) {
-      assertTrue(
-          servers.serverFor(retired, AgentMcpScope.PROJECT, null).isEmpty(), retired);
+    for (AgentMcpScope scope : AgentMcpScope.values()) {
+      List<String> keys = servers.serversFor(scope).stream().map(ScopedMcp::key).toList();
+      for (String retired : List.of("repository", "observability", "actions")) {
+        assertFalse(keys.contains(retired), retired);
+      }
+      assertTrue(keys.contains("qits"));
     }
-    assertTrue(servers.serverFor("qits", AgentMcpScope.PROJECT, null).isPresent());
   }
 
   @Test

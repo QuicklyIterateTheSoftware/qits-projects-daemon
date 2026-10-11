@@ -71,13 +71,4 @@ final class ProjectMcpServers implements AgentMcpServers {
   public Map<String, String> platformHeaders() {
     return platformHeaders;
   }
-
-  /**
-   * True: {@code qits} takes no url narrowing, so there is none to ignore. Without this, the pinned
-   * library notes on every configured launch that its narrowing was not honoured.
-   */
-  @Override
-  public boolean honoursNarrowing() {
-    return true;
-  }
 }
