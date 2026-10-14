@@ -12,6 +12,7 @@ import eu.wohlben.qits.agents.HarnessCapabilities;
 import eu.wohlben.qits.agents.HarnessCapabilityService;
 import eu.wohlben.qits.agents.LocalProcessExecutor;
 import eu.wohlben.qits.agents.ProcessRunner;
+import eu.wohlben.qits.agents.WorkLinkProjects;
 import eu.wohlben.qits.commands.CommandLifecycleService;
 import eu.wohlben.qits.commands.CommandLogService;
 import eu.wohlben.qits.commands.CommandRegistry;
@@ -260,6 +261,17 @@ public class ControlSocket {
    */
   @ConfigProperty(name = "qits.platform-mcp.url")
   Optional<String> platformMcpUrl;
+
+  /**
+   * The platform domain ({@code QITS_DOMAIN}), which qits-projects-service's {@code FrontDeskSpecs}
+   * injects into every container it creates — the same name the library's {@link
+   * eu.wohlben.qits.agents.AgentDefaults#platformDomain()} documents. Unlike the rest of this
+   * daemon's own settings, the key maps straight off the bare env var rather than through the {@code
+   * qits.projects-daemon.*} prefix, because the name is the platform's, not this daemon's own
+   * (qits-1204).
+   */
+  @ConfigProperty(name = "qits.domain")
+  Optional<String> domain;
 
   // Resolved from config in start(); package-private so a test can wire the surface without dialling
   // home.
@@ -579,12 +591,25 @@ public class ControlSocket {
       CommandService commandService,
       CommandRegistry commandRegistry,
       DaemonProjectContext context) {
+    // domain is an @ConfigProperty field, so CDI always hands it an Optional (possibly empty); the
+    // null guard is only for a ControlSocket a test built with `new` and never ran through CDI —
+    // none reach wireAgents today, but a null here would otherwise surface as an NPE far from its
+    // cause.
+    Optional<String> domainConfig = domain == null ? Optional.empty() : domain;
+    // Started once, here, so the first launch's footer links are not the one that pays for the
+    // first fetch — see WorkLinkProjects#start(). The bearer supplier hands it the RAW project
+    // token: WorkLinkProjects prepends its own "Bearer " scheme, where bearer() below carries that
+    // scheme already for the control socket's own header (qits-1204).
+    WorkLinkProjects workLinkProjects =
+        new WorkLinkProjects(domainConfig.orElse(null), this::rawProjectToken).start();
     DaemonAgentDefaults defaults =
         new DaemonAgentDefaults(
             agentDefaultType,
             agentActivityTrackingEnabled,
             surfaceConfigurations,
-            DaemonAgentDefaults.factsOf(projectId, repoName));
+            DaemonAgentDefaults.factsOf(projectId, repoName),
+            domainConfig,
+            workLinkProjects);
     ProcessRunner processes = new LocalProcessExecutor();
     AgentTranscriptService transcripts =
         new AgentTranscriptService(
@@ -763,6 +788,18 @@ public class ControlSocket {
     return token == null
         ? Optional.empty()
         : token.filter(value -> !value.isBlank()).map(value -> "Bearer " + value.trim());
+  }
+
+  /**
+   * The project token WITHOUT the {@code Bearer } scheme {@link #bearer()} adds for the control
+   * socket's own header — {@link WorkLinkProjects} prepends that scheme itself, so handing it
+   * {@link #bearer()} verbatim would double it. Asked for on every fetch, same as {@link #bearer()}
+   * is for every dial, so a token that is rotated or only appears later is picked up without a
+   * restart (qits-1204).
+   */
+  Optional<String> rawProjectToken() {
+    return bearer()
+        .map(value -> value.startsWith("Bearer ") ? value.substring("Bearer ".length()) : value);
   }
 
   /**

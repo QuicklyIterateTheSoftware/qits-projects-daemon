@@ -3,9 +3,12 @@ package eu.wohlben.qits.projectsdaemon;
 import eu.wohlben.qits.agents.AgentDefaults;
 import eu.wohlben.qits.agents.AgentSurfaceConfigurations;
 import eu.wohlben.qits.agents.AgentType;
+import eu.wohlben.qits.agents.WorkLinkProjects;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeSet;
 
 /**
  * Resolves the agent preferences a launch falls back on when the request does not state them, and
@@ -32,21 +35,45 @@ final class DaemonAgentDefaults implements AgentDefaults {
   private final boolean activityTrackingDefault;
   private final AgentSurfaceConfigurations surfaces;
   private final Map<String, String> ambientFacts;
+  private final Optional<String> platformDomain;
+  private final WorkLinkProjects workLinkProjects;
 
   /** The pre-configuration shape, for a caller that has no document to hand — every test here. */
   DaemonAgentDefaults(Optional<String> daemonDefault, boolean activityTrackingDefault) {
     this(daemonDefault, activityTrackingDefault, AgentSurfaceConfigurations.shipped(), Map.of());
   }
 
+  /** The pre-qits-1204 shape: no domain and nothing to fetch the estate's slugs from. */
   DaemonAgentDefaults(
       Optional<String> daemonDefault,
       boolean activityTrackingDefault,
       AgentSurfaceConfigurations surfaces,
       Map<String, String> ambientFacts) {
+    this(daemonDefault, activityTrackingDefault, surfaces, ambientFacts, Optional.empty(), null);
+  }
+
+  /**
+   * The qits-1204 shape: adds what {@link #platformDomain()} and {@link #workLinkProjects()} answer.
+   * {@code workLinkProjects} is nullable — a caller with nothing to fetch with (the two constructors
+   * above) passes none, and {@link #workLinkProjects()} then answers the library's own
+   * entity-derived default.
+   */
+  DaemonAgentDefaults(
+      Optional<String> daemonDefault,
+      boolean activityTrackingDefault,
+      AgentSurfaceConfigurations surfaces,
+      Map<String, String> ambientFacts,
+      Optional<String> platformDomain,
+      WorkLinkProjects workLinkProjects) {
     this.daemonDefault = AgentType.parse(daemonDefault.orElse(null)).orElse(AgentType.CLAUDE);
     this.activityTrackingDefault = activityTrackingDefault;
     this.surfaces = surfaces == null ? AgentSurfaceConfigurations.shipped() : surfaces;
     this.ambientFacts = ambientFacts == null ? Map.of() : Map.copyOf(ambientFacts);
+    this.platformDomain =
+        platformDomain == null
+            ? Optional.empty()
+            : platformDomain.map(String::trim).filter(value -> !value.isBlank());
+    this.workLinkProjects = workLinkProjects;
   }
 
   @Override
@@ -90,6 +117,30 @@ final class DaemonAgentDefaults implements AgentDefaults {
   @Override
   public Map<String, String> ambientFacts() {
     return ambientFacts;
+  }
+
+  /**
+   * The platform domain ({@code QITS_DOMAIN}), as {@link ControlSocket} read it; blank or absent
+   * answers empty, same as the library's own default — see qits-1204.
+   */
+  @Override
+  public Optional<String> platformDomain() {
+    return platformDomain;
+  }
+
+  /**
+   * The library's own entity-derived slug, unioned with whatever {@link #workLinkProjects} has
+   * cached from the estate — empty before its first fetch succeeds, or when this container was
+   * built without one (the two older constructors). Sorted and distinct, like {@link
+   * WorkLinkProjects#slugs()} itself (qits-1204).
+   */
+  @Override
+  public List<String> workLinkProjects() {
+    TreeSet<String> union = new TreeSet<>(AgentDefaults.super.workLinkProjects());
+    if (workLinkProjects != null) {
+      union.addAll(workLinkProjects.slugs());
+    }
+    return List.copyOf(union);
   }
 
   /**
