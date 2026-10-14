@@ -57,7 +57,7 @@
              and the provider recordings the daemon's pact rows are written against. Exact
              versions: a new recording is a contract change, adopted on purpose. -->
         <qits-pact-consumer.version>2026.1010.141817</qits-pact-consumer.version>
-        <qits-idp-golden-masters.version>2026.1010.134259</qits-idp-golden-masters.version>
+        <qits-idp-golden-masters.version>2026.1012.180836</qits-idp-golden-masters.version>
 
         <!-- Where the platform publishes it. Overridden by CI (-Dqits.maven.repository.url), derived
              from QITS_DOMAIN; the default below is the public host. -->
