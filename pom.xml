@@ -56,8 +56,8 @@
         <!-- The consumer half of the contracts (ticket qits-1149): the shared golden-master reader,
              and the provider recordings the daemon's pact rows are written against. Exact
              versions: a new recording is a contract change, adopted on purpose. -->
-        <qits-pact-consumer.version>2026.1018.142240</qits-pact-consumer.version>
-        <qits-idp-golden-masters.version>2026.1018.142635</qits-idp-golden-masters.version>
+        <qits-pact-consumer.version>2026.1018.164604</qits-pact-consumer.version>
+        <qits-idp-golden-masters.version>2026.1018.175524</qits-idp-golden-masters.version>
 
         <!-- Where the platform publishes it. Overridden by CI (-Dqits.maven.repository.url), derived
              from QITS_DOMAIN; the default below is the public host. -->
