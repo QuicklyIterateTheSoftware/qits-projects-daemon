@@ -23,15 +23,20 @@
 # Running this image directly is legitimate but idle: with no QITS_PROJECTS_DAEMON_URL it logs
 # "no url configured — projects-daemon is idle" and stays up. There is no checkout here to serve.
 #
+# QITS_DOMAIN is the platform's public domain. The release recipes pass it explicitly via
+# `--opt build-arg:QITS_DOMAIN`; declared here, global and above the first FROM, so FROM lines below
+# can read it too.
+ARG QITS_DOMAIN=wohlben.eu
+
 # --- stage `build`: native-compile ----------------------------------------------------------------
 # The builder JDK MUST be 25: native-image cannot read bytecode newer than its own JDK, and this
 # project targets release 25.
 #
-# `mirror.dev.localhost:8080/quay/…` is qits-platform-mirror's pull-through mirror of quay.io: the
+# `mirror.qits.$QITS_DOMAIN/quay/…` is qits-mirror's pull-through cache of quay.io: the
 # first build fetches the image from upstream and caches it, every later build is served from local
 # disk. The tag is upstream's, unchanged — the mirror revalidates it, so `jdk-25` still moves when
 # quay moves it.
-FROM mirror.dev.localhost:8080/quay/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25 AS build
+FROM mirror.qits.${QITS_DOMAIN}/quay/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-25 AS build
 USER root
 WORKDIR /src
 
@@ -180,8 +185,8 @@ FROM scratch AS binary
 COPY --from=runnable /src/projects-daemon/target/qits-projects-daemon.jar /qits-projects-daemon.jar
 
 # --- runtime --------------------------------------------------------------------------------------
-# `mirror.dev.localhost:8080/redhat/…` is the same mirror, pointed at registry.access.redhat.com.
-FROM mirror.dev.localhost:8080/redhat/ubi9/ubi-minimal:9.6
+# `mirror.qits.$QITS_DOMAIN/redhat/…` is the same mirror, pointed at registry.access.redhat.com.
+FROM mirror.qits.${QITS_DOMAIN}/redhat/ubi9/ubi-minimal:9.6
 WORKDIR /work
 
 # `quarkus.package.output-name` names the binary `qits-projects-daemon` (no -runner suffix), so the
