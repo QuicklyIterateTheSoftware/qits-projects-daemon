@@ -64,7 +64,13 @@ class GoldenMasterRecordingTest {
               "listAvailableAgents",
               "GET",
               "/projects/container/{projectId}/agents/available",
-              200));
+              200),
+          new Interaction(
+              ProviderStates.A_DAEMON_WHOSE_AGENTS_ARE_NOT_WIRED_YET,
+              "listAvailableAgents",
+              "GET",
+              "/projects/container/{projectId}/agents/available",
+              503));
 
   private static final ObjectMapper JSON = new ObjectMapper();
 

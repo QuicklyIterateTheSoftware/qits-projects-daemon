@@ -126,4 +126,9 @@ class ConsumerPactVerificationTest {
   Map<String, String> aDaemonWhoseHarnessesWereProbed() {
     return running == null ? Map.of() : running.params();
   }
+
+  @State(ProviderStates.A_DAEMON_WHOSE_AGENTS_ARE_NOT_WIRED_YET)
+  Map<String, String> aDaemonWhoseAgentsAreNotWiredYet() {
+    return running == null ? Map.of() : running.params();
+  }
 }

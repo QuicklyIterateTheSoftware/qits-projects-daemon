@@ -33,6 +33,14 @@ public final class ProviderStates {
   public static final String A_DAEMON_WHOSE_HARNESSES_WERE_PROBED =
       "a daemon whose harnesses were probed";
 
+  /**
+   * The daemon's API is bound and its agent surface is not wired yet — the boot window before the
+   * harness probe finishes, in which {@code GET /agents/available} answers 503. qits-projects'
+   * relay reads that as "not ready" and asks again.
+   */
+  public static final String A_DAEMON_WHOSE_AGENTS_ARE_NOT_WIRED_YET =
+      "a daemon whose agents are not wired yet";
+
   static final String PROJECT_ID = "00000000-0000-4000-8000-000000000001";
 
   /** The shared secret qits-projects injects as {@code QITS_PROJECTS_DAEMON_API_TOKEN}. */
@@ -54,6 +62,7 @@ public final class ProviderStates {
 
   public ProviderStates() {
     states.put(A_DAEMON_WHOSE_HARNESSES_WERE_PROBED, this::aDaemonWhoseHarnessesWereProbed);
+    states.put(A_DAEMON_WHOSE_AGENTS_ARE_NOT_WIRED_YET, this::aDaemonWhoseAgentsAreNotWiredYet);
   }
 
   /** Every state name this provider answers for. */
@@ -92,12 +101,21 @@ public final class ProviderStates {
                 ""),
             HarnessCapabilities.shipped(AgentType.KIMI, "kimi is not installed in this image"));
     String reportedBy = "project-agent/" + PROJECT_ID;
+    return new Setup(
+        params(),
+        ContractSeams.startApi(
+            root, PROJECT_ID, API_TOKEN, IMAGE_VERSION, reportedBy, capabilities));
+  }
+
+  private Setup aDaemonWhoseAgentsAreNotWiredYet(Path root) {
+    return new Setup(params(), ContractSeams.startApiBeforeAgents(root, PROJECT_ID, API_TOKEN));
+  }
+
+  /** Every state's params: the one project and the bearer its API demands. */
+  private static Map<String, String> params() {
     Map<String, String> params = new TreeMap<>();
     params.put("projectId", PROJECT_ID);
     params.put("apiToken", API_TOKEN);
-    return new Setup(
-        Collections.unmodifiableMap(params),
-        ContractSeams.startApi(
-            root, PROJECT_ID, API_TOKEN, IMAGE_VERSION, reportedBy, capabilities));
+    return Collections.unmodifiableMap(params);
   }
 }

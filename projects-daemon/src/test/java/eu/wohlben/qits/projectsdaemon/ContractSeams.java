@@ -57,6 +57,26 @@ public final class ContractSeams {
       String imageVersion,
       String reportedBy,
       List<HarnessCapabilities> capabilities) {
+    return start(root, projectId, apiToken, imageVersion, reportedBy, capabilities, true);
+  }
+
+  /**
+   * The same API bound <b>before</b> its agent surface is wired: what a booting daemon answers
+   * between its loopback bind and its harness probe finishing, the window in which every agent route
+   * answers 503.
+   */
+  public static RunningApi startApiBeforeAgents(Path root, String projectId, String apiToken) {
+    return start(root, projectId, apiToken, null, null, List.of(), false);
+  }
+
+  private static RunningApi start(
+      Path root,
+      String projectId,
+      String apiToken,
+      String imageVersion,
+      String reportedBy,
+      List<HarnessCapabilities> capabilities,
+      boolean wireAgents) {
     Vertx vertx = Vertx.vertx();
     ProjectsApi api = new ProjectsApi();
     api.vertx = vertx;
@@ -76,14 +96,16 @@ public final class ContractSeams {
         registry,
         project);
     DaemonAgentDefaults defaults = new DaemonAgentDefaults(Optional.of("CLAUDE"), false);
-    api.wireAgents(
-        new eu.wohlben.qits.agents.AgentLaunchService(
-            null, null, null, null, defaults, null, project, null, 0),
-        null,
-        defaults,
-        capabilities,
-        imageVersion,
-        reportedBy);
+    if (wireAgents) {
+      api.wireAgents(
+          new eu.wohlben.qits.agents.AgentLaunchService(
+              null, null, null, null, defaults, null, project, null, 0),
+          null,
+          defaults,
+          capabilities,
+          imageVersion,
+          reportedBy);
+    }
     try {
       api.listen(vertx, "127.0.0.1", 0, apiToken)
           .toCompletionStage()
