@@ -8,7 +8,6 @@ import au.com.dius.pact.core.model.ProviderState;
 import au.com.dius.pact.provider.junit5.HttpTestTarget;
 import au.com.dius.pact.provider.junit5.PactVerificationContext;
 import au.com.dius.pact.provider.junit5.PactVerificationInvocationContextProvider;
-import au.com.dius.pact.provider.junitsupport.IgnoreNoPactsToVerify;
 import au.com.dius.pact.provider.junitsupport.Provider;
 import au.com.dius.pact.provider.junitsupport.State;
 import au.com.dius.pact.provider.junitsupport.loader.PactSource;
@@ -30,10 +29,9 @@ import org.junit.jupiter.api.io.TempDir;
  * pins that jar as a test dependency, and qits-maintenance bumps the pin when the consumer releases
  * a changed pact. {@link ClasspathPactLoader} finds them all.
  *
- * <p><b>No consumer pins a pact yet</b> (qits-projects-service is the one expected), so {@code
- * @IgnoreNoPactsToVerify} lets an empty classpath pass and the loader logs that nothing was
- * verified. When the first consumer's pact jar is pinned, drop the annotation and set {@link
- * ClasspathPactLoader#REQUIRED} to true.
+ * <p><b>Pinned today:</b> qits-projects-service's pact (its agent-harness read of a project's
+ * daemon). {@link ClasspathPactLoader#REQUIRED} is true, so a classpath that lost its pinned pacts
+ * fails rather than verifying nothing.
  *
  * <p>Plain JUnit, no Quarkus application: the API is a raw Vert.x server the state starts on its own
  * ({@link ProviderStates}). Each interaction gets a fresh daemon in the state it names, over real
@@ -42,7 +40,6 @@ import org.junit.jupiter.api.io.TempDir;
  */
 @Provider(ConsumerPactVerificationTest.PROVIDER)
 @PactSource(ClasspathPactLoader.class)
-@IgnoreNoPactsToVerify
 class ConsumerPactVerificationTest {
 
   /** The provider's name in a pact: the repository name. */
@@ -61,9 +58,6 @@ class ConsumerPactVerificationTest {
 
   @BeforeEach
   void target(PactVerificationContext context, Pact pact, Interaction interaction) {
-    if (context == null) {
-      return; // no pact to verify: @IgnoreNoPactsToVerify's single empty run
-    }
     String consumer = pact.getConsumer().getName();
     List<ProviderState> named = interaction.getProviderStates();
     if (named.size() != 1) {
@@ -115,9 +109,7 @@ class ConsumerPactVerificationTest {
   @TestTemplate
   @ExtendWith(PactVerificationInvocationContextProvider.class)
   void consumerPactHolds(PactVerificationContext context) {
-    if (context != null) {
-      context.verifyInteraction();
-    }
+    context.verifyInteraction();
   }
 
   // --- the states: the daemon is already started in @BeforeEach; these hand back the params ----
