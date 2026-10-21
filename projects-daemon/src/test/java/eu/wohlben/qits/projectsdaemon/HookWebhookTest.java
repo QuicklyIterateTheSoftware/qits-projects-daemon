@@ -64,6 +64,21 @@ class HookWebhookTest {
     assertEquals(AgentState.ENDED, lastSent().state());
   }
 
+  /** What DeliveryKeeper's tick reads: the stored state, WAITING surviving a Stop, gone at end. */
+  @Test
+  void lastStateIsTheStoredState() {
+    assertEquals(java.util.Optional.empty(), webhook.lastState("cmd-1"));
+    webhook.handle("SessionStart", payload("SessionStart"), "cmd-1");
+    assertEquals(java.util.Optional.of(AgentState.IDLE), webhook.lastState("cmd-1"));
+    webhook.handle("UserPromptSubmit", payload("UserPromptSubmit"), "cmd-1");
+    assertEquals(java.util.Optional.of(AgentState.BUSY), webhook.lastState("cmd-1"));
+    webhook.handle("Notification", payload("Notification"), "cmd-1");
+    webhook.handle("Stop", payload("Stop"), "cmd-1");
+    assertEquals(java.util.Optional.of(AgentState.WAITING), webhook.lastState("cmd-1"));
+    webhook.handle("SessionEnd", payload("SessionEnd"), "cmd-1");
+    assertEquals(java.util.Optional.empty(), webhook.lastState("cmd-1"));
+  }
+
   @Test
   void forwardsSessionIdentityFields() {
     webhook.handle("SessionStart", payload("SessionStart"), "cmd-1");

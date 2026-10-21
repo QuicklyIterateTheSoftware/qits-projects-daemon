@@ -196,9 +196,23 @@ class FrontDeskKeeperTest {
             null,
             false,
             false,
-            null),
+            null,
+            null,
+            Map.of("QITS_DELIVERY_TOKEN", "", "QITS_DELIVERY_TOKEN_SUBJECT", "")),
         request);
     assertTrue(logs().isEmpty(), "a first launch is not a relaunch");
+  }
+
+  /** The project.work desk never holds the delivery desk's credential (qits-1495). */
+  @Test
+  void theProjectWorkLaunchCarriesTheScrubOverlay() {
+    keeper(Lifecycle.ALWAYS_ON).start();
+    advance(0);
+
+    Map<String, String> overlay = desk.launches.getFirst().environment();
+    assertEquals("", overlay.get("QITS_DELIVERY_TOKEN"), "an empty value removes the variable");
+    assertEquals("", overlay.get("QITS_DELIVERY_TOKEN_SUBJECT"));
+    assertFalse(overlay.containsKey("QITS_TOKEN"), "and the container's own token is left alone");
   }
 
   @Test
