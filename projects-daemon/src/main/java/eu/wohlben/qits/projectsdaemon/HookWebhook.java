@@ -10,6 +10,7 @@ import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.json.JsonObject;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -158,6 +159,15 @@ final class HookWebhook {
     } catch (RuntimeException e) {
       LOG.debugf(e, "AgentLaunchService.onActivity failed for command %s", commandId);
     }
+  }
+
+  /**
+   * The last state stored for {@code commandId} — what {@link DeliveryKeeper}'s tick reads to tell
+   * an idle delivery desk from a busy one. Empty when nothing was heard yet or the session ended.
+   */
+  Optional<String> lastState(String commandId) {
+    AgentActivity activity = commandId == null ? null : lastByCommand.get(commandId);
+    return activity == null ? Optional.empty() : Optional.ofNullable(activity.state());
   }
 
   /** Re-send the last known activity for every still-tracked command (reconnect adoption). */

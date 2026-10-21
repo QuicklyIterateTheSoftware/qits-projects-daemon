@@ -302,6 +302,8 @@ public final class CheckoutFollower {
     // The default is to inherit, which is the point: QITS_COMMISSIONED_CLIENT_ID/_SECRET are how
     // the CLI signs in, and nothing here needs to know their values to pass them on.
     Map<String, String> environment = builder.environment();
+    // Except the delivery desk's credential, which is for the delivery session alone.
+    DeliveryCredentials.scrub(environment);
     environment.putAll(
         additionalEnvironment(environment, gitBase, authTokenUrl, gitAuthAudience));
     return builder;

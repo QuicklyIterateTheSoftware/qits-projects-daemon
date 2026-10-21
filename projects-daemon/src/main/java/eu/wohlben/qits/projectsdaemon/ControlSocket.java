@@ -1,6 +1,7 @@
 package eu.wohlben.qits.projectsdaemon;
 
 import eu.wohlben.qits.agents.AgentAuthStatus;
+import eu.wohlben.qits.agents.AgentCommands;
 import eu.wohlben.qits.agents.AgentLaunchService;
 import eu.wohlben.qits.agents.AgentSessionQueryService;
 import eu.wohlben.qits.agents.AgentSessionStore;
@@ -247,6 +248,30 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.projects-daemon.lifecycle")
   Optional<String> lifecycle;
 
+  /**
+   * Whether this container keeps a {@code project.delivery} desk running and ticks it ({@code
+   * QITS_PROJECTS_DAEMON_DELIVERY}): {@code on} or {@code off}, the default. Independent of {@link
+   * #lifecycle}. See {@link DeliveryKeeper}.
+   */
+  @ConfigProperty(name = "qits.projects-daemon.delivery")
+  Optional<String> delivery;
+
+  /** How often the delivery desk is nudged ({@code …_DELIVERY_INTERVAL}), ISO-8601; PT10M. */
+  @ConfigProperty(name = "qits.projects-daemon.delivery-interval")
+  Optional<String> deliveryInterval;
+
+  /**
+   * The delivery desk's own token ({@code QITS_DELIVERY_TOKEN}), handed to the delivery session as
+   * its {@code QITS_TOKEN} and to no other child ({@link DeliveryCredentials}). Unset means no
+   * delivery desk, whatever {@link #delivery} says.
+   */
+  @ConfigProperty(name = "qits.projects-daemon.delivery-token")
+  Optional<String> deliveryToken;
+
+  /** Whom {@link #deliveryToken} names ({@code QITS_DELIVERY_TOKEN_SUBJECT}). */
+  @ConfigProperty(name = "qits.projects-daemon.delivery-token-subject")
+  Optional<String> deliveryTokenSubject;
+
   /** Whether launches wire the turn-boundary activity hooks; the lineage hook is unconditional. */
   @ConfigProperty(name = "qits.agent.activity-tracking-enabled", defaultValue = "true")
   boolean agentActivityTrackingEnabled;
@@ -354,6 +379,12 @@ public class ControlSocket {
    * unwired. Package-private for the same reason {@link #provisioned} is.
    */
   volatile FrontDeskKeeper frontDesk;
+
+  /**
+   * The delivery-desk keeper {@link #wireAgents} built beside {@link #frontDesk}, started with it by
+   * {@link #keepFrontDesk()}. Null when the agent surface stayed unwired.
+   */
+  volatile DeliveryKeeper deliveryDesk;
 
   /**
    * The live terminal and chat sessions {@link #wireCapabilities} spawns — held so {@link #stop}
@@ -477,7 +508,8 @@ public class ControlSocket {
           // After the API is wired, never before: the loopback surface must not wait on a
           // subprocess, and a container whose clone failed has no checkout to hold.
           followCheckout();
-          // Last: a desk needs both the checkout and the wired agent surface.
+          // Last: a desk needs both the checkout and the wired agent surface. The delivery desk
+          // starts beside the front desk, on its own switch.
           keepFrontDesk();
         });
   }
@@ -521,19 +553,31 @@ public class ControlSocket {
   }
 
   /**
-   * Start the {@link FrontDeskKeeper} — but only when the boot provision produced a checkout and
-   * {@link #wireAgents} wired a launch service; it is itself a no-op unless the lifecycle is {@code
-   * ALWAYS_ON}. Never throws, for the same reason {@link #followCheckout()} does not.
+   * Start the {@link FrontDeskKeeper} and the {@link DeliveryKeeper} — but only when the boot
+   * provision produced a checkout and {@link #wireAgents} wired a launch service. Each is itself a
+   * no-op unless its own switch is on: the lifecycle {@code ALWAYS_ON} for the front desk, delivery
+   * {@code on} with a token for the delivery desk; neither reads the other's. Never throws, for the
+   * same reason {@link #followCheckout()} does not.
    */
   void keepFrontDesk() {
-    FrontDeskKeeper keeper = frontDesk;
-    if (!provisioned || keeper == null) {
+    if (!provisioned) {
       return;
     }
-    try {
-      keeper.start();
-    } catch (RuntimeException e) {
-      LOG.warnf("The front desk keeper did not start: %s", e.getMessage());
+    FrontDeskKeeper keeper = frontDesk;
+    if (keeper != null) {
+      try {
+        keeper.start();
+      } catch (RuntimeException e) {
+        LOG.warnf("The front desk keeper did not start: %s", e.getMessage());
+      }
+    }
+    DeliveryKeeper delivering = deliveryDesk;
+    if (delivering != null) {
+      try {
+        delivering.start();
+      } catch (RuntimeException e) {
+        LOG.warnf("The delivery desk keeper did not start: %s", e.getMessage());
+      }
     }
   }
 
@@ -610,7 +654,8 @@ public class ControlSocket {
             DaemonAgentDefaults.factsOf(projectId, repoName),
             domainConfig,
             workLinkProjects);
-    ProcessRunner processes = new LocalProcessExecutor();
+    // Every probe and preflight child sees the delivery credential blank (DeliveryCredentials).
+    ProcessRunner processes = DeliveryCredentials.processes(new LocalProcessExecutor());
     AgentTranscriptService transcripts =
         new AgentTranscriptService(
             store, logs, agentSessionStore, claudeMount, () -> nudge(ChangeTopic.COMMANDS));
@@ -619,9 +664,14 @@ public class ControlSocket {
     tail.start();
     this.transcriptTail = tail;
     AgentAuthStatus authStatus = new AgentAuthStatus(processes, claudeMount, WORKSPACE_DIR.toPath());
+    // Every session spawned through it — the sign-in terminal included, which takes no overlay —
+    // sees the delivery credential blank unless its launch decided otherwise (DeliveryCredentials).
+    AgentCommands agentCommands =
+        DeliveryCredentials.commands(
+            new CommandsAgentCommands(commandService, commandRegistry, store));
     AgentLaunchService launch =
         new AgentLaunchService(
-            new CommandsAgentCommands(commandService, commandRegistry, store),
+            agentCommands,
             authStatus,
             transcripts,
             tail,
@@ -643,20 +693,35 @@ public class ControlSocket {
     if (h != null) {
       h.setAgentLaunch(launch);
     }
+    // The launch inherits this process's environment, CLAUDE_CONFIG_DIR included.
+    ClaudeTokenPreflight preflight =
+        ClaudeTokenPreflight.of(
+            processes,
+            claudeMount,
+            System.getenv("CLAUDE_CONFIG_DIR"),
+            Path.of(System.getProperty("java.io.tmpdir")));
     frontDesk =
         new FrontDeskKeeper(
             FrontDeskKeeper.Lifecycle.parse(lifecycle),
+            FrontDeskKeeper.Desk.of(launch, store, commandRegistry, claudeMount, preflight),
+            FrontDeskKeeper.Timing.DEFAULT,
+            FrontDeskKeeper.Scheduler.worker(),
+            System::currentTimeMillis,
+            this::send);
+    deliveryDesk =
+        new DeliveryKeeper(
+            DeliveryKeeper.Settings.parse(
+                delivery, deliveryInterval, deliveryToken, deliveryTokenSubject),
             FrontDeskKeeper.Desk.of(
-                launch,
+                DeliveryKeeper.SURFACE, launch, store, commandRegistry, claudeMount, preflight),
+            DeliveryKeeper.Session.of(
                 store,
                 commandRegistry,
-                claudeMount,
-                // The launch inherits this process's environment, CLAUDE_CONFIG_DIR included.
-                ClaudeTokenPreflight.of(
-                    processes,
-                    claudeMount,
-                    System.getenv("CLAUDE_CONFIG_DIR"),
-                    Path.of(System.getProperty("java.io.tmpdir")))),
+                agentCommands,
+                commandId -> {
+                  HookWebhook webhook = hooks;
+                  return webhook == null ? Optional.empty() : webhook.lastState(commandId);
+                }),
             FrontDeskKeeper.Timing.DEFAULT,
             FrontDeskKeeper.Scheduler.worker(),
             System::currentTimeMillis,
@@ -1035,6 +1100,10 @@ public class ControlSocket {
     FrontDeskKeeper keeper = frontDesk;
     if (keeper != null) {
       keeper.stop();
+    }
+    DeliveryKeeper delivering = deliveryDesk;
+    if (delivering != null) {
+      delivering.stop();
     }
     // Agents go first, before anything else is torn down — see stopAgents for why.
     stopAgents(commands);

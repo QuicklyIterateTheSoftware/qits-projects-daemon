@@ -502,6 +502,7 @@ public final class Provisioner {
       File workingDir,
       Consumer<DaemonMessage> emit) {
     ProcessBuilder builder = new ProcessBuilder(argv);
+    DeliveryCredentials.scrub(builder.environment());
     builder.environment().putAll(environment);
     if (workingDir != null && workingDir.isDirectory()) {
       builder.directory(workingDir);
@@ -576,6 +577,7 @@ public final class Provisioner {
     try {
       ProcessBuilder builder =
           new ProcessBuilder(argv).redirectError(ProcessBuilder.Redirect.DISCARD);
+      DeliveryCredentials.scrub(builder.environment());
       if (workingDir != null && workingDir.isDirectory()) {
         builder.directory(workingDir);
       }

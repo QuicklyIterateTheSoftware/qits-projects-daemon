@@ -16,6 +16,7 @@ import eu.wohlben.qits.commands.InvalidCommandRequestException;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -108,6 +109,25 @@ class AgentJsonTest {
     assertTrue(request.fork());
     assertTrue(request.deliverTaskPrompt());
     assertEquals(AgentType.KIMI, request.agentType());
+  }
+
+  /**
+   * A browser-started session never holds the delivery desk's credential (qits-1495): both names
+   * map to empty, which the library renders as a removal. The project.delivery surface is no
+   * exception — only {@link DeliveryKeeper} hands that session its token.
+   */
+  @Test
+  void aLaunchFromTheBrowserCarriesTheScrubOverlay() {
+    for (String surface : List.of("project.work", "project.delivery")) {
+      AgentLaunchRequest request =
+          AgentJson.launchRequest(
+              new JsonObject().put("scope", "REPOSITORY").put("surface", surface));
+
+      assertEquals(
+          Map.of("QITS_DELIVERY_TOKEN", "", "QITS_DELIVERY_TOKEN_SUBJECT", ""),
+          request.environment(),
+          surface);
+    }
   }
 
   @Test

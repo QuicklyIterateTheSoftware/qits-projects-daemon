@@ -106,15 +106,19 @@ final class AgentJson {
    * answer it should get.
    */
   static AgentLaunchRequest launchRequest(JsonObject json) {
-    return new AgentLaunchRequest(
-        parseEnum(json.getString("scope"), AgentMcpScope::valueOf, "scope"),
-        surfaceOf(json.getString("surface")),
-        parseEnum(json.getString("mode"), AgentLaunchMode::valueOf, "mode"),
-        json.getString("initialContext"),
-        json.getString("resumeSessionId"),
-        Boolean.TRUE.equals(json.getBoolean("fork")),
-        Boolean.TRUE.equals(json.getBoolean("deliverTaskPrompt")),
-        parseEnum(json.getString("agentType"), AgentType::valueOf, "agentType"));
+    // Scrubbed: a browser-started session never holds the delivery desk's credential, whatever
+    // surface it names — project.delivery included (DeliveryCredentials). No body field can set an
+    // overlay; the library's record is host-set only.
+    return DeliveryCredentials.scrubbed(
+        new AgentLaunchRequest(
+            parseEnum(json.getString("scope"), AgentMcpScope::valueOf, "scope"),
+            surfaceOf(json.getString("surface")),
+            parseEnum(json.getString("mode"), AgentLaunchMode::valueOf, "mode"),
+            json.getString("initialContext"),
+            json.getString("resumeSessionId"),
+            Boolean.TRUE.equals(json.getBoolean("fork")),
+            Boolean.TRUE.equals(json.getBoolean("deliverTaskPrompt")),
+            parseEnum(json.getString("agentType"), AgentType::valueOf, "agentType")));
   }
 
   /**
