@@ -106,9 +106,10 @@ final class AgentJson {
    * answer it should get.
    */
   static AgentLaunchRequest launchRequest(JsonObject json) {
-    // Scrubbed: a browser-started session never holds the delivery desk's credential, whatever
-    // surface it names — project.delivery included (DeliveryCredentials). No body field can set an
-    // overlay; the library's record is host-set only.
+    // Scrubbed: a browser-started session never holds the delivery token, whatever surface it
+    // names — project.work and project.delivery included; only the keeper's own front desk does
+    // (DeliveryCredentials, FrontDeskCredential). No body field can set an overlay; the library's
+    // record is host-set only.
     return DeliveryCredentials.scrubbed(
         new AgentLaunchRequest(
             parseEnum(json.getString("scope"), AgentMcpScope::valueOf, "scope"),

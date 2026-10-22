@@ -249,21 +249,22 @@ public class ControlSocket {
   Optional<String> lifecycle;
 
   /**
-   * Whether this container keeps a {@code project.delivery} desk running and ticks it ({@code
-   * QITS_PROJECTS_DAEMON_DELIVERY}): {@code on} or {@code off}, the default. Independent of {@link
-   * #lifecycle}. See {@link DeliveryKeeper}.
+   * Whether this container's front desk runs the delivery loop ({@code
+   * QITS_PROJECTS_DAEMON_DELIVERY}): {@code on} or {@code off}, the default. On with a token, the
+   * front desk is kept whatever {@link #lifecycle} says, launched with the delivery token, and
+   * ticked. See {@link DeliveryKeeper} and {@link FrontDeskCredential}.
    */
   @ConfigProperty(name = "qits.projects-daemon.delivery")
   Optional<String> delivery;
 
-  /** How often the delivery desk is nudged ({@code …_DELIVERY_INTERVAL}), ISO-8601; PT10M. */
+  /** How often the front desk is ticked ({@code …_DELIVERY_INTERVAL}), ISO-8601; PT10M. */
   @ConfigProperty(name = "qits.projects-daemon.delivery-interval")
   Optional<String> deliveryInterval;
 
   /**
-   * The delivery desk's own token ({@code QITS_DELIVERY_TOKEN}), handed to the delivery session as
-   * its {@code QITS_TOKEN} and to no other child ({@link DeliveryCredentials}). Unset means no
-   * delivery desk, whatever {@link #delivery} says.
+   * The desk's delivery token ({@code QITS_DELIVERY_TOKEN}), handed to the keeper's front desk
+   * session as its {@code QITS_TOKEN} ({@link FrontDeskCredential}) and to no other child ({@link
+   * DeliveryCredentials}). Unset means no delivery loop, whatever {@link #delivery} says.
    */
   @ConfigProperty(name = "qits.projects-daemon.delivery-token")
   Optional<String> deliveryToken;
@@ -381,10 +382,10 @@ public class ControlSocket {
   volatile FrontDeskKeeper frontDesk;
 
   /**
-   * The delivery-desk keeper {@link #wireAgents} built beside {@link #frontDesk}, started with it by
-   * {@link #keepFrontDesk()}. Null when the agent surface stayed unwired.
+   * The delivery tick {@link #wireAgents} built over {@link #frontDesk}'s own session, started with
+   * it by {@link #keepFrontDesk()}. Null when the agent surface stayed unwired.
    */
-  volatile DeliveryKeeper deliveryDesk;
+  volatile DeliveryKeeper deliveryTick;
 
   /**
    * The live terminal and chat sessions {@link #wireCapabilities} spawns — held so {@link #stop}
@@ -440,6 +441,9 @@ public class ControlSocket {
     // which is what "fails visibly rather than idling while looking healthy" means for this image.
     surfaceConfigurations =
         AgentConfigurationBoot.materialize(agentConfiguration, agentConfigurationPath);
+    // The delivery loop's brief is the project.delivery surface's prompt in that document, and the
+    // document is read only here, so this is where the brief is (re)written. Never throws.
+    DeliveryKeeper.writeBrief(DeliveryKeeper.BRIEF_PATH, surfaceConfigurations, projectId);
     if (url.isEmpty() || url.get().isBlank()) {
       LOG.warn(
           "No qits.projects-daemon.url configured — projects-daemon is idle (the container stays"
@@ -508,8 +512,8 @@ public class ControlSocket {
           // After the API is wired, never before: the loopback surface must not wait on a
           // subprocess, and a container whose clone failed has no checkout to hold.
           followCheckout();
-          // Last: a desk needs both the checkout and the wired agent surface. The delivery desk
-          // starts beside the front desk, on its own switch.
+          // Last: a desk needs both the checkout and the wired agent surface. The delivery tick
+          // starts beside it.
           keepFrontDesk();
         });
   }
@@ -553,11 +557,10 @@ public class ControlSocket {
   }
 
   /**
-   * Start the {@link FrontDeskKeeper} and the {@link DeliveryKeeper} — but only when the boot
-   * provision produced a checkout and {@link #wireAgents} wired a launch service. Each is itself a
-   * no-op unless its own switch is on: the lifecycle {@code ALWAYS_ON} for the front desk, delivery
-   * {@code on} with a token for the delivery desk; neither reads the other's. Never throws, for the
-   * same reason {@link #followCheckout()} does not.
+   * Start the {@link FrontDeskKeeper} and the {@link DeliveryKeeper} tick — but only when the boot
+   * provision produced a checkout and {@link #wireAgents} wired a launch service. The keeper is a
+   * no-op unless the lifecycle is {@code ALWAYS_ON} or delivery is {@code on} with a token; the tick
+   * unless the latter. Never throws, for the same reason {@link #followCheckout()} does not.
    */
   void keepFrontDesk() {
     if (!provisioned) {
@@ -571,12 +574,12 @@ public class ControlSocket {
         LOG.warnf("The front desk keeper did not start: %s", e.getMessage());
       }
     }
-    DeliveryKeeper delivering = deliveryDesk;
-    if (delivering != null) {
+    DeliveryKeeper ticking = deliveryTick;
+    if (ticking != null) {
       try {
-        delivering.start();
+        ticking.start();
       } catch (RuntimeException e) {
-        LOG.warnf("The delivery desk keeper did not start: %s", e.getMessage());
+        LOG.warnf("The delivery tick did not start: %s", e.getMessage());
       }
     }
   }
@@ -700,20 +703,23 @@ public class ControlSocket {
             claudeMount,
             System.getenv("CLAUDE_CONFIG_DIR"),
             Path.of(System.getProperty("java.io.tmpdir")));
-    frontDesk =
+    DeliveryKeeper.Settings deliverySettings =
+        DeliveryKeeper.Settings.parse(
+            delivery, deliveryInterval, deliveryToken, deliveryTokenSubject);
+    FrontDeskKeeper keeper =
         new FrontDeskKeeper(
             FrontDeskKeeper.Lifecycle.parse(lifecycle),
+            new FrontDeskCredential(deliverySettings),
             FrontDeskKeeper.Desk.of(launch, store, commandRegistry, claudeMount, preflight),
             FrontDeskKeeper.Timing.DEFAULT,
             FrontDeskKeeper.Scheduler.worker(),
             System::currentTimeMillis,
             this::send);
-    deliveryDesk =
+    frontDesk = keeper;
+    deliveryTick =
         new DeliveryKeeper(
-            DeliveryKeeper.Settings.parse(
-                delivery, deliveryInterval, deliveryToken, deliveryTokenSubject),
-            FrontDeskKeeper.Desk.of(
-                DeliveryKeeper.SURFACE, launch, store, commandRegistry, claudeMount, preflight),
+            deliverySettings,
+            keeper::keptCommandId,
             DeliveryKeeper.Session.of(
                 store,
                 commandRegistry,
@@ -722,10 +728,8 @@ public class ControlSocket {
                   HookWebhook webhook = hooks;
                   return webhook == null ? Optional.empty() : webhook.lastState(commandId);
                 }),
-            FrontDeskKeeper.Timing.DEFAULT,
             FrontDeskKeeper.Scheduler.worker(),
-            System::currentTimeMillis,
-            this::send);
+            System::currentTimeMillis);
     projectsApi.wireAgents(
         launch,
         new AgentSessionQueryService(store, agentSessionStore),
@@ -1101,9 +1105,9 @@ public class ControlSocket {
     if (keeper != null) {
       keeper.stop();
     }
-    DeliveryKeeper delivering = deliveryDesk;
-    if (delivering != null) {
-      delivering.stop();
+    DeliveryKeeper ticking = deliveryTick;
+    if (ticking != null) {
+      ticking.stop();
     }
     // Agents go first, before anything else is torn down — see stopAgents for why.
     stopAgents(commands);

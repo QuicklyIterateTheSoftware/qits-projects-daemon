@@ -203,7 +203,7 @@ class FrontDeskKeeperTest {
     assertTrue(logs().isEmpty(), "a first launch is not a relaunch");
   }
 
-  /** The project.work desk never holds the delivery desk's credential (qits-1495). */
+  /** Delivery off: the project.work desk never holds the delivery token (qits-1495, qits-1440). */
   @Test
   void theProjectWorkLaunchCarriesTheScrubOverlay() {
     keeper(Lifecycle.ALWAYS_ON).start();
@@ -230,6 +230,94 @@ class FrontDeskKeeperTest {
     // And its own live session is never launched twice either.
     advance(TIMING.resetAfterMs() * 3);
     assertEquals(1, desk.launches.size());
+  }
+
+  @Test
+  void deliveryOffNeverNamesAForeignSessionAsItsOwn() {
+    desk.foreignLive = true;
+    FrontDeskKeeper keeper = keeper(Lifecycle.ALWAYS_ON);
+    keeper.start();
+    advance(TIMING.resetAfterMs());
+    assertTrue(keeper.keptCommandId().isEmpty(), "the SPA's desk is watched, not kept");
+  }
+
+  // --- delivering (qits-1440) -----------------------------------------------------------------
+
+  private static final String TOKEN = "delivery-token-value";
+
+  private FrontDeskKeeper delivering(Lifecycle lifecycle) {
+    return new FrontDeskKeeper(
+        lifecycle,
+        new FrontDeskCredential(
+            DeliveryKeeper.Settings.parse(
+                Optional.of("on"),
+                Optional.empty(),
+                Optional.of(TOKEN),
+                Optional.of("desk-delivery:p-1"))),
+        desk,
+        TIMING,
+        scheduler,
+        () -> now,
+        sent::add);
+  }
+
+  @Test
+  void deliveringLaunchesItsOwnDeskBesideAPersonsAndTracksIt() {
+    desk.foreignLive = true; // a person's project.work session, started from the desk panel
+    FrontDeskKeeper keeper = delivering(Lifecycle.ON_DEMAND);
+    keeper.start();
+    advance(0);
+
+    assertEquals(1, desk.launches.size(), "a person's session is not the delivering desk");
+    assertEquals(AgentSurface.PROJECT_WORK, desk.launches.getFirst().surface());
+    assertEquals(
+        Map.of(
+            "QITS_TOKEN",
+            TOKEN,
+            "QITS_TOKEN_SUBJECT",
+            "desk-delivery:p-1",
+            "QITS_DELIVERY_TOKEN",
+            "",
+            "QITS_DELIVERY_TOKEN_SUBJECT",
+            ""),
+        desk.launches.getFirst().environment());
+    String first = desk.lastRunning().id();
+    assertEquals(Optional.of(first), keeper.keptCommandId());
+
+    advance(TIMING.resetAfterMs() * 3);
+    assertEquals(1, desk.launches.size(), "its own live session is never launched twice");
+
+    desk.exitLast(1);
+    advance(TIMING.pollMs());
+    assertTrue(keeper.keptCommandId().isEmpty(), "between the exit and the relaunch: none");
+    advance(TIMING.initialBackoffMs());
+    assertEquals(2, desk.launches.size(), "relaunched although the person's is still up");
+    assertEquals(
+        desk.commands.get(first).currentSession().sessionId(),
+        desk.launches.getLast().resumeSessionId(),
+        "resuming the keeper's own session");
+    assertEquals(Optional.of(desk.lastRunning().id()), keeper.keptCommandId());
+  }
+
+  @Test
+  void theCredentialSeamDecidesTheOverlay() {
+    assertEquals(DeliveryCredentials.SCRUB, FrontDeskCredential.SCRUBBED.launchOverlay());
+    assertFalse(FrontDeskCredential.SCRUBBED.delivering());
+    FrontDeskCredential noToken =
+        new FrontDeskCredential(
+            DeliveryKeeper.Settings.parse(
+                Optional.of("on"), Optional.empty(), Optional.of(" "), Optional.empty()));
+    assertFalse(noToken.delivering());
+    assertEquals(DeliveryCredentials.SCRUB, noToken.launchOverlay(), "no token, no rights");
+    FrontDeskCredential noSubject =
+        new FrontDeskCredential(
+            DeliveryKeeper.Settings.parse(
+                Optional.of("on"), Optional.empty(), Optional.of(TOKEN), Optional.empty()));
+    assertTrue(noSubject.delivering());
+    assertEquals(
+        "",
+        noSubject.launchOverlay().get("QITS_TOKEN_SUBJECT"),
+        "a blank subject removes the container's own rather than naming a different token");
   }
 
   @Test

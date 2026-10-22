@@ -2,13 +2,16 @@ package eu.wohlben.qits.projectsdaemon;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.agents.AgentConfigurationDocument;
 import eu.wohlben.qits.agents.AgentLaunchMode;
 import eu.wohlben.qits.agents.AgentLaunchRequest;
 import eu.wohlben.qits.agents.AgentMcpScope;
 import eu.wohlben.qits.agents.AgentNotSignedInException;
 import eu.wohlben.qits.agents.AgentSurface;
+import eu.wohlben.qits.agents.AgentSurfaceConfigurations;
 import eu.wohlben.qits.agents.AgentType;
 import eu.wohlben.qits.commands.AgentSessionRef;
 import eu.wohlben.qits.commands.AgentSessionSource;
@@ -16,8 +19,10 @@ import eu.wohlben.qits.commands.Command;
 import eu.wohlben.qits.commands.CommandKind;
 import eu.wohlben.qits.commands.CommandStatus;
 import eu.wohlben.qits.commands.GuardedInput;
-import eu.wohlben.qits.projectsdaemon.protocol.DaemonLog;
-import eu.wohlben.qits.projectsdaemon.protocol.DaemonMessage;
+import eu.wohlben.qits.projectsdaemon.FrontDeskKeeper.Lifecycle;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -28,12 +33,14 @@ import java.util.Optional;
 import java.util.PriorityQueue;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
- * {@link DeliveryKeeper} against the same faked harness {@link FrontDeskKeeperTest} uses ({@link
- * FrontDeskKeeper.Desk}), a faked {@link DeliveryKeeper.Session} and a virtual clock: the on/off
- * and token gate, the {@code project.delivery} launch and its overlay, the tick when idle and the
- * skip when busy, and the ladder it shares with the front desk.
+ * The delivery loop as turns in the front desk session (qits-1440): {@link FrontDeskKeeper} with the
+ * {@link FrontDeskCredential} built from the delivery settings, and the {@link DeliveryKeeper} tick
+ * over the keeper's own command — wired the way {@link ControlSocket} wires them, against a faked
+ * harness and a virtual clock. The gate, the launch overlay, the keeper's own session beside a
+ * person's, the tick when idle and the skip otherwise, and the brief.
  */
 class DeliveryKeeperTest {
 
@@ -41,6 +48,18 @@ class DeliveryKeeperTest {
   private static final Duration INTERVAL = Duration.ofMinutes(10);
   private static final String TOKEN = "delivery-token-value";
   private static final String SUBJECT = "desk-delivery:p-1";
+
+  /** What the front desk launches with while delivering. */
+  private static final Map<String, String> DELIVERY_OVERLAY =
+      Map.of(
+          "QITS_TOKEN",
+          TOKEN,
+          "QITS_TOKEN_SUBJECT",
+          SUBJECT,
+          "QITS_DELIVERY_TOKEN",
+          "",
+          "QITS_DELIVERY_TOKEN_SUBJECT",
+          "");
 
   // --- the virtual clock and scheduler --------------------------------------------------------
 
@@ -56,23 +75,28 @@ class DeliveryKeeperTest {
                   ? Long.compare(a.dueAt(), b.dueAt())
                   : Long.compare(a.order(), b.order()));
 
-  private boolean shutdown;
+  /** One virtual worker per component, as production gives each its own thread. */
+  private final class VirtualScheduler implements FrontDeskKeeper.Scheduler {
+    private boolean shutdown;
 
-  private final FrontDeskKeeper.Scheduler scheduler =
-      new FrontDeskKeeper.Scheduler() {
-        @Override
-        public void schedule(Runnable step, long delayMs) {
-          if (!shutdown) {
-            tasks.add(new Task(now + delayMs, sequence++, step));
-          }
-        }
+    @Override
+    public void schedule(Runnable step, long delayMs) {
+      if (!shutdown) {
+        tasks.add(new Task(now + delayMs, sequence++, () -> runUnlessShutdown(step)));
+      }
+    }
 
-        @Override
-        public void shutdown() {
-          shutdown = true;
-          tasks.clear();
-        }
-      };
+    private void runUnlessShutdown(Runnable step) {
+      if (!shutdown) {
+        step.run();
+      }
+    }
+
+    @Override
+    public void shutdown() {
+      shutdown = true;
+    }
+  }
 
   private void advance(long ms) {
     long until = now + ms;
@@ -90,6 +114,7 @@ class DeliveryKeeperTest {
     final List<AgentLaunchRequest> launches = new ArrayList<>();
     final Map<String, Command> commands = new HashMap<>();
     final Map<String, String> states = new HashMap<>();
+    final List<String> typedInto = new ArrayList<>();
     final List<String> typed = new ArrayList<>();
     boolean signedIn = true;
     boolean draft;
@@ -100,6 +125,13 @@ class DeliveryKeeperTest {
         throw new AgentNotSignedInException(AgentType.CLAUDE);
       }
       launches.add(request);
+      Command command = session(request.surface().key());
+      // The SessionStart hook reports IDLE.
+      states.put(command.id(), "IDLE");
+      return command;
+    }
+
+    Command session(String surface) {
       Command command =
           Command.running(
                   UUID.randomUUID().toString(),
@@ -107,11 +139,11 @@ class DeliveryKeeperTest {
                   null,
                   null,
                   null,
-                  "delivery desk",
+                  "front desk",
                   "claude",
                   true,
                   "CLAUDE",
-                  request.surface().key(),
+                  surface,
                   Instant.ofEpochMilli(now))
               .withSession(
                   new AgentSessionRef(
@@ -121,8 +153,6 @@ class DeliveryKeeperTest {
                       null,
                       Instant.ofEpochMilli(now)));
       commands.put(command.id(), command);
-      // The SessionStart hook reports IDLE.
-      states.put(command.id(), "IDLE");
       return command;
     }
 
@@ -133,7 +163,8 @@ class DeliveryKeeperTest {
 
     @Override
     public boolean liveSessionExists() {
-      return liveCommandId().isPresent();
+      return commands.values().stream()
+          .anyMatch(command -> command.isRunning() && "project.work".equals(command.agentSurface()));
     }
 
     @Override
@@ -142,12 +173,9 @@ class DeliveryKeeperTest {
     }
 
     @Override
-    public Optional<String> liveCommandId() {
-      return commands.values().stream()
-          .filter(Command::isRunning)
-          .filter(command -> "project.delivery".equals(command.agentSurface()))
-          .map(Command::id)
-          .findFirst();
+    public boolean running(String commandId) {
+      Command command = commands.get(commandId);
+      return command != null && command.isRunning();
     }
 
     @Override
@@ -160,65 +188,73 @@ class DeliveryKeeperTest {
       if (draft) {
         return GuardedInput.HELD_FOR_DRAFT;
       }
+      typedInto.add(commandId);
       typed.add(text);
       return GuardedInput.WRITTEN;
     }
 
-    String live() {
-      return liveCommandId().orElseThrow();
-    }
-
-    void exitLive(int code) {
-      Command live = commands.get(live());
+    void exit(String commandId, int code) {
+      Command live = commands.get(commandId);
       commands.put(
           live.id(), live.finished(CommandStatus.EXITED, code, Instant.ofEpochMilli(now)));
     }
   }
 
   private final FakeDesk desk = new FakeDesk();
-  private final List<DaemonMessage> sent = new ArrayList<>();
 
-  private DeliveryKeeper keeper(String delivery, String token) {
-    return new DeliveryKeeper(
+  private FrontDeskKeeper frontDesk;
+  private DeliveryKeeper tick;
+
+  /** Both halves, wired as {@link ControlSocket#wireAgents} wires them, and started. */
+  private void start(Lifecycle lifecycle, String delivery, String token) {
+    DeliveryKeeper.Settings settings =
         DeliveryKeeper.Settings.parse(
             Optional.ofNullable(delivery),
             Optional.of("PT10M"),
             Optional.ofNullable(token),
-            Optional.of(SUBJECT)),
-        desk,
-        desk,
-        TIMING,
-        scheduler,
-        () -> now,
-        sent::add);
+            Optional.of(SUBJECT));
+    frontDesk =
+        new FrontDeskKeeper(
+            lifecycle,
+            new FrontDeskCredential(settings),
+            desk,
+            TIMING,
+            new VirtualScheduler(),
+            () -> now,
+            message -> {});
+    tick =
+        new DeliveryKeeper(
+            settings, frontDesk::keptCommandId, desk, new VirtualScheduler(), () -> now);
+    frontDesk.start();
+    tick.start();
   }
 
-  private List<DaemonLog> logs() {
-    return sent.stream().filter(DaemonLog.class::isInstance).map(DaemonLog.class::cast).toList();
+  private String kept() {
+    return frontDesk.keptCommandId().orElseThrow();
   }
 
   // --- the gate -------------------------------------------------------------------------------
 
   @Test
-  void offLaunchesNothing() {
-    keeper("off", TOKEN).start();
+  void offOnDemandLaunchesAndTicksNothing() {
+    start(Lifecycle.ON_DEMAND, "off", TOKEN);
     advance(INTERVAL.toMillis() * 3);
     assertEquals(0, desk.launches.size());
     assertTrue(tasks.isEmpty(), "nothing is scheduled, not even a tick");
-    assertTrue(sent.isEmpty());
   }
 
   @Test
-  void unsetLaunchesNothing() {
-    keeper(null, TOKEN).start();
+  void offAlwaysOnLaunchesTheScrubbedFrontDeskAndNeverTicksIt() {
+    start(Lifecycle.ALWAYS_ON, null, TOKEN);
     advance(INTERVAL.toMillis() * 3);
-    assertEquals(0, desk.launches.size());
-    assertTrue(tasks.isEmpty());
+    assertEquals(1, desk.launches.size());
+    assertEquals(DeliveryCredentials.SCRUB, desk.launches.getFirst().environment());
+    assertTrue(desk.typed.isEmpty(), "delivery off: no tick");
   }
 
   @Test
-  void onWithoutATokenLaunchesNothing() {
-    keeper("on", " ").start();
+  void onWithoutATokenIsOff() {
+    start(Lifecycle.ON_DEMAND, "on", " ");
     advance(INTERVAL.toMillis() * 3);
     assertEquals(0, desk.launches.size());
     assertTrue(tasks.isEmpty());
@@ -227,15 +263,15 @@ class DeliveryKeeperTest {
   // --- the launch -----------------------------------------------------------------------------
 
   @Test
-  void onWithATokenLaunchesProjectDeliveryWithTheDeliveryTokenAsItsOwn() {
-    keeper("on", TOKEN).start();
+  void onWithATokenLaunchesTheFrontDeskWithTheDeliveryToken() {
+    start(Lifecycle.ALWAYS_ON, "on", TOKEN);
     advance(0);
 
     assertEquals(1, desk.launches.size());
     assertEquals(
         new AgentLaunchRequest(
             AgentMcpScope.REPOSITORY,
-            AgentSurface.PROJECT_DELIVERY,
+            AgentSurface.PROJECT_WORK,
             AgentLaunchMode.INTERACTIVE,
             null,
             null,
@@ -243,46 +279,67 @@ class DeliveryKeeperTest {
             false,
             null,
             null,
-            Map.of("QITS_TOKEN", TOKEN, "QITS_TOKEN_SUBJECT", SUBJECT)),
+            DELIVERY_OVERLAY),
         desk.launches.getFirst());
   }
 
   @Test
-  void aLiveProjectWorkSessionIsNotTheDeliveryDesk() {
-    // The front desk is up; the delivery keeper's live check matches project.delivery only.
-    Command work =
-        Command.running(
-            "work-1",
-            CommandKind.TERMINAL,
-            null,
-            null,
-            null,
-            "front desk",
-            "claude",
-            true,
-            "CLAUDE",
-            "project.work",
-            Instant.ofEpochMilli(now));
-    desk.commands.put(work.id(), work);
-
-    keeper("on", TOKEN).start();
+  void deliveryKeepsTheFrontDeskEvenOnDemandAndNeverLaunchesProjectDelivery() {
+    start(Lifecycle.ON_DEMAND, "on", TOKEN);
     advance(0);
+    assertEquals(1, desk.launches.size(), "the loop needs a desk to run in");
+
+    String first = kept();
+    desk.exit(first, 1);
+    advance(TIMING.pollMs() + TIMING.initialBackoffMs());
+    assertEquals(2, desk.launches.size(), "and it is kept, not launched once");
+    assertNotEquals(first, kept());
+
+    advance(INTERVAL.toMillis() * 3);
+    assertTrue(
+        desk.launches.stream().allMatch(r -> r.surface().equals(AgentSurface.PROJECT_WORK)),
+        "one desk, one session: nothing launches project.delivery");
+    assertTrue(
+        desk.launches.stream().allMatch(r -> r.environment().equals(DELIVERY_OVERLAY)),
+        "every relaunch carries the delivery overlay");
+  }
+
+  @Test
+  void aPersonsProjectWorkSessionDoesNotStopTheKeeperAndNeverGetsTheTick() {
+    // A person opened the desk panel first. Their session is scrubbed and holds no delivery rights.
+    Command person = desk.session("project.work");
+    desk.states.put(person.id(), "IDLE");
+
+    start(Lifecycle.ALWAYS_ON, "on", TOKEN);
+    advance(0);
+    assertEquals(1, desk.launches.size(), "the keeper launches its own beside the person's");
+    assertNotEquals(person.id(), kept());
+
+    advance(INTERVAL.toMillis());
+    assertEquals(List.of(kept()), desk.typedInto, "the tick goes to the keeper's command only");
+
+    // The person's session ending changes nothing for the keeper's.
+    desk.exit(person.id(), 0);
+    advance(TIMING.resetAfterMs());
     assertEquals(1, desk.launches.size());
-    assertEquals(AgentSurface.PROJECT_DELIVERY, desk.launches.getFirst().surface());
   }
 
   // --- the tick -------------------------------------------------------------------------------
 
   @Test
   void theTickIsTypedWhenTheDeskIsIdle() {
-    keeper("on", TOKEN).start();
+    start(Lifecycle.ALWAYS_ON, "on", TOKEN);
     advance(0);
 
     advance(INTERVAL.toMillis() - 1);
     assertTrue(desk.typed.isEmpty(), "not before the interval");
     advance(1);
     assertEquals(
-        List.of("Run one pass of the delivery loop (tick " + Instant.ofEpochMilli(now) + ")."),
+        List.of(
+            "Run one pass of the delivery loop: read /tmp/qits-delivery-brief.md and follow it."
+                + " (tick "
+                + Instant.ofEpochMilli(now)
+                + ")"),
         desk.typed);
 
     advance(INTERVAL.toMillis());
@@ -291,9 +348,9 @@ class DeliveryKeeperTest {
 
   @Test
   void theTickIsSkippedWhileTheDeskIsBusyAndNeverQueued() {
-    keeper("on", TOKEN).start();
+    start(Lifecycle.ALWAYS_ON, "on", TOKEN);
     advance(0);
-    String live = desk.live();
+    String live = kept();
 
     desk.states.put(live, "BUSY");
     advance(INTERVAL.toMillis());
@@ -317,7 +374,7 @@ class DeliveryKeeperTest {
 
   @Test
   void theTickIsSkippedWhileAPersonHasADraft() {
-    keeper("on", TOKEN).start();
+    start(Lifecycle.ALWAYS_ON, "on", TOKEN);
     advance(0);
     desk.draft = true;
     advance(INTERVAL.toMillis());
@@ -325,56 +382,38 @@ class DeliveryKeeperTest {
   }
 
   @Test
-  void noTickWithoutARunningDesk() {
+  void noTickWhileTheKeeperHasNoDesk() {
     desk.signedIn = false;
-    keeper("on", TOKEN).start();
+    start(Lifecycle.ALWAYS_ON, "on", TOKEN);
     advance(INTERVAL.toMillis() * 2);
+    assertTrue(frontDesk.keptCommandId().isEmpty());
+    assertTrue(desk.typed.isEmpty(), "never launched, never typed into");
+  }
+
+  @Test
+  void aCommandThatIsNotRunningIsNotTypedInto() {
+    // The keeper still names a command that exited between its polls: the tick checks it anyway.
+    Command exited = desk.session("project.work");
+    desk.states.put(exited.id(), "IDLE");
+    desk.exit(exited.id(), 0);
+    new DeliveryKeeper(
+            DeliveryKeeper.Settings.parse(
+                Optional.of("on"), Optional.of("PT1M"), Optional.of(TOKEN), Optional.empty()),
+            () -> Optional.of(exited.id()),
+            desk,
+            new VirtualScheduler(),
+            () -> now)
+        .start();
+    advance(Duration.ofMinutes(3).toMillis());
     assertTrue(desk.typed.isEmpty());
-    assertEquals(
-        "delivery desk not signed in: run the login command on the runners page",
-        logs().getFirst().message());
-  }
-
-  // --- the ladder -----------------------------------------------------------------------------
-
-  @Test
-  void theBackoffDoublesAndResets() {
-    keeper("on", TOKEN).start();
-    advance(0);
-
-    for (long expected : List.of(5_000L, 10_000L, 20_000L)) {
-      int before = desk.launches.size();
-      desk.exitLive(1);
-      advance(TIMING.pollMs());
-      advance(expected - 1);
-      assertEquals(before, desk.launches.size(), "not before " + expected + " ms");
-      advance(1);
-      assertEquals(before + 1, desk.launches.size(), "relaunched after " + expected + " ms");
-    }
-    assertEquals("delivery desk relaunched (exit 1)", logs().getFirst().message());
-
-    // Ten minutes up resets the ladder to 5 s.
-    advance(TIMING.resetAfterMs());
-    desk.exitLive(137);
-    advance(TIMING.pollMs());
-    int before = desk.launches.size();
-    advance(TIMING.initialBackoffMs());
-    assertEquals(before + 1, desk.launches.size(), "the backoff reset after 10 min up");
-    assertEquals(
-        Map.of("QITS_TOKEN", TOKEN, "QITS_TOKEN_SUBJECT", SUBJECT),
-        desk.launches.getLast().environment(),
-        "every relaunch carries the overlay");
   }
 
   @Test
-  void stopEndsSupervisionAndTicks() {
-    DeliveryKeeper keeper = keeper("on", TOKEN);
-    keeper.start();
+  void stopEndsTicks() {
+    start(Lifecycle.ALWAYS_ON, "on", TOKEN);
     advance(0);
-    keeper.stop();
-    desk.exitLive(143);
+    tick.stop();
     advance(INTERVAL.toMillis() * 2);
-    assertEquals(1, desk.launches.size());
     assertTrue(desk.typed.isEmpty());
   }
 
@@ -387,20 +426,13 @@ class DeliveryKeeperTest {
     assertFalse(parse("sometimes", null).enabled(), "a typo is off");
     assertTrue(parse("on", null).enabled());
     assertTrue(parse("ON", null).enabled());
+    assertFalse(DeliveryKeeper.Settings.OFF.runnable());
 
     assertEquals(DeliveryKeeper.DEFAULT_INTERVAL, parse("on", null).interval());
     assertEquals(Duration.ofMinutes(10), DeliveryKeeper.DEFAULT_INTERVAL);
     assertEquals(Duration.ofMinutes(2), parse("on", "PT2M").interval());
     assertEquals(DeliveryKeeper.DEFAULT_INTERVAL, parse("on", "ten minutes").interval());
     assertEquals(DeliveryKeeper.DEFAULT_INTERVAL, parse("on", "PT0S").interval());
-
-    DeliveryKeeper.Settings noSubject =
-        DeliveryKeeper.Settings.parse(
-            Optional.of("on"), Optional.empty(), Optional.of(TOKEN), Optional.empty());
-    assertEquals(
-        Map.of("QITS_TOKEN", TOKEN, "QITS_TOKEN_SUBJECT", ""),
-        noSubject.environment(),
-        "a blank subject removes the container's own rather than naming a different token");
   }
 
   private static DeliveryKeeper.Settings parse(String delivery, String interval) {
@@ -409,5 +441,65 @@ class DeliveryKeeperTest {
         Optional.ofNullable(interval),
         Optional.of(TOKEN),
         Optional.empty());
+  }
+
+  // --- the brief ------------------------------------------------------------------------------
+
+  private static AgentSurfaceConfigurations document(String deliveryPrompt) {
+    return AgentSurfaceConfigurations.of(
+        AgentConfigurationDocument.parse(
+            """
+            {
+              "version": 2,
+              "generatedAt": "2026-10-22T10:00:00Z",
+              "surfaces": [
+                {
+                  "configuration": {
+                    "surface": "project.delivery",
+                    "harness": "CLAUDE",
+                    "model": "",
+                    "effort": "",
+                    "remoteControl": true,
+                    "permissionMode": "SKIP_PERMISSIONS",
+                    "activityTracking": true,
+                    "systemPrompt": %s,
+                    "initialPrompt": "",
+                    "mcpServers": []
+                  }
+                }
+              ]
+            }
+            """
+                .formatted(deliveryPrompt),
+            "test"));
+  }
+
+  @Test
+  void theBriefIsTheDeliverySurfacesPrompt(@TempDir Path dir) throws Exception {
+    Path brief = dir.resolve("qits-delivery-brief.md");
+    DeliveryKeeper.writeBrief(brief, document("\"You are the delivery desk.\\nShip it.\""), "qits");
+
+    assertEquals("You are the delivery desk.\nShip it.\n", Files.readString(brief));
+    assertEquals("rw-r--r--", PosixFilePermissions.toString(Files.getPosixFilePermissions(brief)));
+  }
+
+  @Test
+  void theBriefFallsBackWhenTheDocumentCarriesNone(@TempDir Path dir) throws Exception {
+    Path brief = dir.resolve("qits-delivery-brief.md");
+
+    DeliveryKeeper.writeBrief(brief, AgentSurfaceConfigurations.shipped(), "qits");
+    String fallback = Files.readString(brief);
+    assertTrue(fallback.contains("qits projects delivery --project qits"), fallback);
+    assertTrue(fallback.contains("one pass"), fallback);
+
+    DeliveryKeeper.writeBrief(brief, document("\"  \""), "qits");
+    assertEquals(fallback, Files.readString(brief), "a blank prompt is no prompt");
+  }
+
+  @Test
+  void theTickTurnPointsAtTheBrief() {
+    assertEquals(Path.of("/tmp/qits-delivery-brief.md"), DeliveryKeeper.BRIEF_PATH);
+    assertTrue(
+        DeliveryKeeper.tickTurn(Instant.EPOCH).length() < 800, "a turn stays under the limit");
   }
 }

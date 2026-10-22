@@ -18,7 +18,6 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -31,17 +30,23 @@ import org.jboss.logging.Logger;
 /**
  * Keeps this project's front desk — one interactive {@code project.work} session, which the surface
  * seed launches as {@code claude --remote-control '🐞 qits front desk'} — running for the life of the
- * container, when the container was created {@link Lifecycle#ALWAYS_ON}.
+ * container, when the container was created {@link Lifecycle#ALWAYS_ON} or when it runs the delivery
+ * loop ({@link FrontDeskCredential#delivering()}).
  *
  * <p>Started by {@link ControlSocket} once the boot provision succeeded <b>and</b> the agent surface
  * was wired; a container whose clone failed has nothing to steer a desk at, and one whose agents
  * stayed unwired has nothing to launch with. {@link Lifecycle#ON_DEMAND} — the default — starts
- * nothing at all, which keeps a container that was not asked for a desk byte for byte what it was.
+ * nothing at all, which keeps a container that was not asked for a desk byte for byte what it was;
+ * unless delivery is on, in which case the desk is kept whatever the lifecycle says.
  *
  * <ul>
  *   <li><b>Launch</b> only when no live {@code project.work} session exists. One the SPA started
  *       counts: the desk is the surface, not whoever opened it, and two of them would be two remote
- *       control threads for one desk.
+ *       control threads for one desk. <b>Not while delivering:</b> then the desk is the session
+ *       that holds the delivery token and takes the delivery ticks, which a session a person started
+ *       from the desk panel never is (it is scrubbed). So the keeper tracks the command it launched
+ *       ({@link #keptCommandId()}), counts only that one as live, and launches its own beside
+ *       anybody else's.
  *   <li><b>Supervise:</b> when the keeper's session exits, it is relaunched after a backoff that
  *       starts at 5 s and doubles to 5 min, and resets once a session stayed up for 10 min. It never
  *       gives up: a desk that stops coming back is the failure this class exists to remove.
@@ -64,9 +69,9 @@ import org.jboss.logging.Logger;
  * {@link Scheduler}, the clock), so a test drives the ladder deterministically without a real
  * harness or a real wait.
  *
- * <p>The ladder is keyed by a {@link Role} — the surface it keeps, the overlay it launches with, the
- * name it logs under — so {@link DeliveryKeeper} runs the {@code project.delivery} session on the
- * same ladder without a second copy of it. {@link Role#FRONT_DESK} is this class's own.
+ * <p>The launch's credential is {@link FrontDeskCredential}'s to decide, asked before every launch:
+ * the delivery token while delivering, the scrub otherwise. The delivery loop itself is {@link
+ * DeliveryKeeper}'s tick, typed into {@link #keptCommandId()}.
  */
 final class FrontDeskKeeper {
 
@@ -75,23 +80,8 @@ final class FrontDeskKeeper {
   /** The surface the desk runs as. */
   static final AgentSurface SURFACE = AgentSurface.PROJECT_WORK;
 
-  /**
-   * Which session a keeper keeps.
-   *
-   * @param surface what it launches, and what its live-session check matches — so two keepers of
-   *     different surfaces never mistake one another's session for their own
-   * @param label how it names the session in its logs and {@link DaemonLog}s
-   * @param environment the launch's environment overlay
-   */
-  record Role(AgentSurface surface, String label, Map<String, String> environment) {
-
-    /** The {@code project.work} front desk, launched without the delivery credential. */
-    static final Role FRONT_DESK = new Role(SURFACE, "front desk", DeliveryCredentials.SCRUB);
-
-    String notSignedInMessage() {
-      return label + " not signed in: run the login command on the runners page";
-    }
-  }
+  /** How the desk is named in the logs and {@link DaemonLog}s. */
+  private static final String LABEL = "front desk";
 
   /** Whether this container keeps a front desk running ({@code QITS_PROJECTS_DAEMON_LIFECYCLE}). */
   enum Lifecycle {
@@ -140,7 +130,10 @@ final class FrontDeskKeeper {
     /** The command as the store holds it now, or empty once it is gone. */
     Optional<Command> find(String commandId);
 
-    /** Whether any live session of the keeper's surface exists, whoever started it. */
+    /**
+     * Whether any live {@code project.work} session exists, whoever started it. Asked only while
+     * not delivering.
+     */
     boolean liveSessionExists();
 
     /** Whether {@code sessionId}'s transcript is still on the credential volume. */
@@ -154,17 +147,6 @@ final class FrontDeskKeeper {
 
     /** The production {@code project.work} desk over this daemon's launch service and store. */
     static Desk of(
-        AgentLaunchService launch,
-        CommandStore store,
-        CommandRegistry registry,
-        String claudeMount,
-        ClaudeTokenPreflight preflight) {
-      return of(SURFACE, launch, store, registry, claudeMount, preflight);
-    }
-
-    /** The production desk for {@code surface}'s session. */
-    static Desk of(
-        AgentSurface surface,
         AgentLaunchService launch,
         CommandStore store,
         CommandRegistry registry,
@@ -191,7 +173,7 @@ final class FrontDeskKeeper {
           return store.findByStatus(CommandStatus.RUNNING).stream()
               .anyMatch(
                   command ->
-                      surface.key().equals(command.agentSurface())
+                      SURFACE.key().equals(command.agentSurface())
                           && registry.isRunning(command.id()));
         }
 
@@ -235,7 +217,7 @@ final class FrontDeskKeeper {
   }
 
   private final Lifecycle lifecycle;
-  private final Role role;
+  private final FrontDeskCredential credential;
   private final Desk desk;
   private final Timing timing;
   private final Scheduler scheduler;
@@ -245,8 +227,10 @@ final class FrontDeskKeeper {
   private volatile boolean started;
   private volatile boolean stopped;
 
+  // Written only on the scheduler's single thread; volatile because the delivery tick reads it.
+  private volatile String commandId;
+
   // Touched only on the scheduler's single thread (and start(), before the first step runs).
-  private String commandId;
   private long launchedAt;
   private long backoffMs;
   private String previousSessionId;
@@ -260,19 +244,19 @@ final class FrontDeskKeeper {
       Scheduler scheduler,
       LongSupplier clock,
       Consumer<DaemonMessage> send) {
-    this(lifecycle, Role.FRONT_DESK, desk, timing, scheduler, clock, send);
+    this(lifecycle, FrontDeskCredential.SCRUBBED, desk, timing, scheduler, clock, send);
   }
 
   FrontDeskKeeper(
       Lifecycle lifecycle,
-      Role role,
+      FrontDeskCredential credential,
       Desk desk,
       Timing timing,
       Scheduler scheduler,
       LongSupplier clock,
       Consumer<DaemonMessage> send) {
     this.lifecycle = lifecycle;
-    this.role = role;
+    this.credential = credential;
     this.desk = desk;
     this.timing = timing;
     this.scheduler = scheduler;
@@ -281,9 +265,13 @@ final class FrontDeskKeeper {
     this.backoffMs = timing.initialBackoffMs();
   }
 
-  /** Begin keeping the desk, once; a no-op unless {@link Lifecycle#ALWAYS_ON}. */
+  /**
+   * Begin keeping the desk, once; a no-op unless {@link Lifecycle#ALWAYS_ON} or delivering — the
+   * delivery loop needs a desk to run in, so delivery keeps one even {@link Lifecycle#ON_DEMAND}.
+   */
   void start() {
-    if (lifecycle != Lifecycle.ALWAYS_ON) {
+    boolean delivering = credential.delivering();
+    if (lifecycle != Lifecycle.ALWAYS_ON && !delivering) {
       LOG.debug("Lifecycle ON_DEMAND: no front desk is kept; the SPA launches one when asked.");
       return;
     }
@@ -291,8 +279,24 @@ final class FrontDeskKeeper {
       return;
     }
     started = true;
-    LOG.infof("Keeping the %s %s running.", role.surface().key(), role.label());
+    if (delivering) {
+      LOG.infof(
+          "Keeping the %s %s running with the delivery token; it runs the delivery loop.",
+          SURFACE.key(), LABEL);
+    } else {
+      LOG.infof("Keeping the %s %s running.", SURFACE.key(), LABEL);
+    }
     scheduler.schedule(this::attempt, 0);
+  }
+
+  /**
+   * The command the keeper launched, while it is the one being kept — what the delivery tick types
+   * into. Empty before the first launch and between an exit and the relaunch. It names the
+   * keeper's own session only, never one a person started: a person's session holds no delivery
+   * token.
+   */
+  Optional<String> keptCommandId() {
+    return Optional.ofNullable(commandId);
   }
 
   /** Stop supervising; the live session itself is left to {@code CommandRegistry.terminateAll()}. */
@@ -301,19 +305,22 @@ final class FrontDeskKeeper {
     scheduler.shutdown();
   }
 
-  /** Launch the desk, unless one is already live. */
+  /**
+   * Launch the desk, unless one is already live. While delivering only the keeper's own session
+   * counts, and this runs only when there is none, so it launches whoever else's is up.
+   */
   private void attempt() {
     if (stopped) {
       return;
     }
     try {
-      if (desk.liveSessionExists()) {
+      if (!credential.delivering() && desk.liveSessionExists()) {
         // Somebody else's desk (the SPA's) is up. Watch it; launch when it is gone.
         scheduler.schedule(this::poll, timing.pollMs());
         return;
       }
     } catch (RuntimeException e) {
-      LOG.warnf("Could not ask for a live %s session: %s", role.label(), e.getMessage());
+      LOG.warnf("Could not ask for a live %s session: %s", LABEL, e.getMessage());
       scheduler.schedule(this::attempt, timing.pollMs());
       return;
     }
@@ -324,7 +331,7 @@ final class FrontDeskKeeper {
     } catch (RuntimeException e) {
       LOG.warnf(
           "%s: the claude.ai token preflight failed (%s); launching anyway",
-          role.label(), e.getClass().getSimpleName());
+          LABEL, e.getClass().getSimpleName());
     }
     String resume = resumableSession();
     Command command;
@@ -333,7 +340,7 @@ final class FrontDeskKeeper {
           desk.launch(
               new AgentLaunchRequest(
                   AgentMcpScope.REPOSITORY,
-                  role.surface(),
+                  SURFACE,
                   AgentLaunchMode.INTERACTIVE,
                   null,
                   resume,
@@ -341,16 +348,16 @@ final class FrontDeskKeeper {
                   false,
                   null,
                   null,
-                  role.environment()));
+                  credential.launchOverlay()));
     } catch (AgentNotSignedInException e) {
-      String message = role.notSignedInMessage();
+      String message = LABEL + " not signed in: run the login command on the runners page";
       LOG.warn(message);
       send.accept(new DaemonLog("WARN", message));
       scheduler.schedule(this::attempt, timing.notSignedInRetryMs());
       return;
     } catch (RuntimeException e) {
       // A resume the harness refuses must not wedge the desk on that id: the next try is fresh.
-      LOG.warnf("The %s did not launch: %s", role.label(), e.getMessage());
+      LOG.warnf("The %s did not launch: %s", LABEL, e.getMessage());
       previousSessionId = null;
       previousCommand = null;
       scheduler.schedule(this::attempt, nextBackoff());
@@ -359,12 +366,12 @@ final class FrontDeskKeeper {
     commandId = command.id();
     launchedAt = clock.getAsLong();
     if (pendingExitCode != null) {
-      String message = role.label() + " relaunched (exit " + pendingExitCode + ")";
+      String message = LABEL + " relaunched (exit " + pendingExitCode + ")";
       LOG.info(message);
       send.accept(new DaemonLog("INFO", message));
       pendingExitCode = null;
     } else {
-      LOG.infof("%s launched (command %s)", role.label(), commandId);
+      LOG.infof("%s launched (command %s)", LABEL, commandId);
     }
     scheduler.schedule(this::poll, timing.pollMs());
   }
@@ -412,7 +419,7 @@ final class FrontDeskKeeper {
     long delay = nextBackoff();
     LOG.debugf(
         "%s exited (exit %d); relaunching in %d ms",
-        role.label(),
+        LABEL,
         (Object) pendingExitCode,
         (Object) delay);
     scheduler.schedule(this::attempt, delay);

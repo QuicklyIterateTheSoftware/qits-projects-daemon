@@ -42,11 +42,14 @@ library declares:
     AgentConfigurationBoot  materializing the per-surface configuration document at boot
     CheckoutFollower        supervising `qits checkout-daemon`, which holds /workspace at what the
                             repositories released; started after the boot provision and the API
-    FrontDeskKeeper         keeping the project.work front desk running when the lifecycle is ALWAYS_ON;
-                            started after the follower, only on a successful provision with agents wired
-    DeliveryKeeper          keeping the project.delivery desk running on FrontDeskKeeper's ladder, as the
-                            delivery token, and ticking it; started beside the front desk, on its own switch
-    DeliveryCredentials     keeping QITS_DELIVERY_TOKEN(_SUBJECT) out of every child but the delivery session
+    FrontDeskKeeper         keeping the project.work front desk running when the lifecycle is ALWAYS_ON or
+                            delivery is on; started after the follower, only on a successful provision with
+                            agents wired; while delivering it tracks and keeps ITS OWN command
+    FrontDeskCredential     the one seam deciding the front desk launch's credential: the delivery token as
+                            QITS_TOKEN while delivering, the scrub otherwise (qits-1482 swaps only this)
+    DeliveryKeeper          the delivery tick: one "Run one pass of the delivery loop" turn per interval,
+                            typed into the keeper's own front desk when idle; writes the loop's brief
+    DeliveryCredentials     keeping QITS_DELIVERY_TOKEN(_SUBJECT) out of every child but the keeper's front desk
 
 Both library modules are framework-free — no CDI, no JAX-RS, no Jackson — so they cannot read
 configuration. `ControlSocket` is the single reader and hands every setting down as a constructor
@@ -382,19 +385,35 @@ derive fails at the boundary instead of far from it.
                                          session while its transcript exists; not signed in ⇒ a DaemonLog WARN and
                                          a retry every 5 min, never a sign-in terminal
     QITS_PROJECTS_DAEMON_DELIVERY        on | off (default; anything else ⇒ one WARN, off). on AND a delivery token ⇒
-                                         a project.delivery desk is kept (DeliveryKeeper) on the front desk's
-                                         ladder, whatever the lifecycle; otherwise one INFO and nothing
-    QITS_PROJECTS_DAEMON_DELIVERY_INTERVAL  ISO-8601, default PT10M: every interval the delivery desk is typed
-                                         "Run one pass of the delivery loop (tick <instant>)." — only while it is
-                                         RUNNING and its last hook-reported state is IDLE (no draft); busy ⇒ the
-                                         tick is skipped at DEBUG, never queued
-    QITS_DELIVERY_TOKEN                  the delivery desk's own token (desk-delivery commission, qits:desk); the
-                                         delivery session gets it as its QITS_TOKEN (and so as its qits MCP bearer)
-    QITS_DELIVERY_TOKEN_SUBJECT          whom it names; the delivery session's QITS_TOKEN_SUBJECT. NEITHER name
-                                         reaches any other child (DeliveryCredentials): every other launch gets
-                                         an overlay mapping both to "" (removed), and the daemon's own spawns —
-                                         RunCommand, the checkout follower, the git reads, the probes, the
-                                         sign-in terminal — strip or blank them
+                                         the front desk runs the delivery loop: ONE session, no separate
+                                         project.delivery one (owner ruling, 2026-10-22). The keeper keeps the
+                                         front desk whatever the lifecycle, launches it with the delivery token,
+                                         tracks the command it launched and counts only THAT one as live — a
+                                         project.work session a person started from the desk panel neither
+                                         stops it launching its own nor ever gets a tick. Off ⇒ one INFO, and
+                                         the keeper behaves exactly as the lifecycle alone says (deferring to any
+                                         live project.work session)
+    QITS_PROJECTS_DAEMON_DELIVERY_INTERVAL  ISO-8601, default PT10M: every interval the keeper's front desk is typed
+                                         "Run one pass of the delivery loop: read /tmp/qits-delivery-brief.md and
+                                         follow it. (tick <instant>)" — only while that command is RUNNING and its
+                                         last hook-reported state is IDLE (no draft); otherwise the tick is
+                                         skipped at DEBUG, never queued
+    QITS_DELIVERY_TOKEN                  the desk's delivery token (desk-delivery commission, qits:desk); the
+                                         keeper's front desk gets it as its QITS_TOKEN (and so as its qits MCP
+                                         bearer), decided in one place, FrontDeskCredential
+    QITS_DELIVERY_TOKEN_SUBJECT          whom it names; the front desk's QITS_TOKEN_SUBJECT. NEITHER name reaches
+                                         any child as itself, and the token reaches no child but the keeper's
+                                         front desk (DeliveryCredentials): every other launch — /agents
+                                         project.work and project.delivery included — gets an overlay mapping
+                                         both to "" (removed), and the daemon's own spawns — RunCommand, the
+                                         checkout follower, the git reads, the probes, the sign-in terminal —
+                                         strip or blank them
+
+**The delivery loop's brief is a file** (`/tmp/qits-delivery-brief.md`, 0644), written at boot right after
+the agent configuration document is materialized — the only time that document is read. Its text is the
+`project.delivery` surface's `systemPrompt` from that document; absent or blank ⇒ a short fallback telling
+the session to read its rules with `qits projects delivery --project <projectId>` and do one pass. The
+`project.delivery` surface is only the brief's store: nothing launches it.
 
 **The front desk refreshes the claude.ai token before every launch** (qits-1102, `ClaudeTokenPreflight`).
 `claude --remote-control` connects Remote Control once, at startup, on whatever access token
