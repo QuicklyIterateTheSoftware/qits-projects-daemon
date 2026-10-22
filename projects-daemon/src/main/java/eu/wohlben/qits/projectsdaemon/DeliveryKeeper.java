@@ -21,6 +21,7 @@ import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
@@ -37,8 +38,12 @@ import org.jboss.logging.Logger;
  * like any other in it. This class launches nothing. The {@code project.delivery} surface survives
  * only as the store of the loop's brief ({@link #writeBrief}), which the tick turn points at.
  *
- * <p><b>It ticks</b> only when {@code qits.projects-daemon.delivery} is {@code on} <em>and</em> a
- * delivery token is set; otherwise it logs once at INFO and does nothing.
+ * <p><b>It ticks</b> only when {@code qits.projects-daemon.delivery} is {@code on}; otherwise it logs
+ * once at INFO and does nothing. With the switch on, each tick also needs the front desk to hold
+ * the delivery rights ({@link FrontDeskCredential#delivering()}): the delivery token before qits
+ * sends session credentials (legacy), the {@code front-desk} credential after (qits-1482). A tick
+ * without them is skipped at DEBUG — under an older qits that never sets a token, that is the old
+ * "no token, no loop", one quiet line per interval.
  *
  * <p><b>The tick</b> goes to the keeper's own command ({@link FrontDeskKeeper#keptCommandId()}),
  * never to a {@code project.work} session a person started from the desk panel — that one is
@@ -70,7 +75,7 @@ final class DeliveryKeeper {
 
   static final String NO_TOKEN_MESSAGE =
       "Delivery is on but no delivery token is set (QITS_DELIVERY_TOKEN): the front desk runs no"
-          + " delivery loop.";
+          + " delivery loop until qits sends it session credentials.";
 
   /**
    * The turn one tick types: one pass of the loop by the brief, stamped so the transcript tells
@@ -248,6 +253,7 @@ final class DeliveryKeeper {
   }
 
   private final Settings settings;
+  private final BooleanSupplier delivering;
   private final Supplier<Optional<String>> frontDesk;
   private final Session session;
   private final Scheduler scheduler;
@@ -270,18 +276,37 @@ final class DeliveryKeeper {
       Session session,
       Scheduler scheduler,
       LongSupplier clock) {
+    this(settings, settings::runnable, frontDesk, session, scheduler, clock);
+  }
+
+  /**
+   * @param delivering whether the front desk holds the delivery rights now ({@link
+   *     FrontDeskCredential#delivering()}), asked on every tick
+   */
+  DeliveryKeeper(
+      Settings settings,
+      BooleanSupplier delivering,
+      Supplier<Optional<String>> frontDesk,
+      Session session,
+      Scheduler scheduler,
+      LongSupplier clock) {
     this.settings = settings;
+    this.delivering = delivering;
     this.frontDesk = frontDesk;
     this.session = session;
     this.scheduler = scheduler;
     this.clock = clock;
   }
 
-  /** Begin ticking the front desk, once; a no-op unless {@link Settings#runnable}. */
+  /** Begin ticking the front desk, once; a no-op unless delivery is on. */
   void start() {
-    if (!settings.runnable()) {
-      LOG.info(settings.enabled() ? NO_TOKEN_MESSAGE : OFF_MESSAGE);
+    if (!settings.enabled()) {
+      LOG.info(OFF_MESSAGE);
       return;
+    }
+    if (!settings.runnable()) {
+      // Under an older qits this is final; a newer one hands the rights over the control socket.
+      LOG.info(NO_TOKEN_MESSAGE);
     }
     if (started || stopped) {
       return;
@@ -311,6 +336,12 @@ final class DeliveryKeeper {
   }
 
   private void nudge() {
+    if (!delivering.getAsBoolean()) {
+      // No rights to run the loop with: no token and no session credentials. Not a run of skips
+      // worth escalating — it is the steady state of a desk whose qits gave it neither.
+      LOG.debug("Delivery tick skipped: the front desk holds no delivery rights.");
+      return;
+    }
     Optional<String> kept = frontDesk.get();
     if (kept.isEmpty() || !session.running(kept.get())) {
       skip("the front desk the keeper launched is not running");

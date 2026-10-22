@@ -18,6 +18,7 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -30,8 +31,9 @@ import org.jboss.logging.Logger;
 /**
  * Keeps this project's front desk — one interactive {@code project.work} session, which the surface
  * seed launches as {@code claude --remote-control '🐞 qits front desk'} — running for the life of the
- * container, when the container was created {@link Lifecycle#ALWAYS_ON} or when it runs the delivery
- * loop ({@link FrontDeskCredential#delivering()}).
+ * container, when the container was created {@link Lifecycle#ALWAYS_ON} or when delivery is on
+ * ({@link FrontDeskCredential#deliveryOn()}; it launches for the loop once it has the rights to run
+ * it, {@link FrontDeskCredential#delivering()}).
  *
  * <p>Started by {@link ControlSocket} once the boot provision succeeded <b>and</b> the agent surface
  * was wired; a container whose clone failed has nothing to steer a desk at, and one whose agents
@@ -43,8 +45,8 @@ import org.jboss.logging.Logger;
  *   <li><b>Launch</b> only when no live {@code project.work} session exists. One the SPA started
  *       counts: the desk is the surface, not whoever opened it, and two of them would be two remote
  *       control threads for one desk. <b>Not while delivering:</b> then the desk is the session
- *       that holds the delivery token and takes the delivery ticks, which a session a person started
- *       from the desk panel never is (it is scrubbed). So the keeper tracks the command it launched
+ *       that holds the delivery rights and takes the delivery ticks, which a session a person
+ *       started from the desk panel never is (it runs on {@code desk-agents}). So the keeper tracks the command it launched
  *       ({@link #keptCommandId()}), counts only that one as live, and launches its own beside
  *       anybody else's.
  *   <li><b>Supervise:</b> when the keeper's session exits, it is relaunched after a backoff that
@@ -56,6 +58,14 @@ import org.jboss.logging.Logger;
  *       volume is refreshed through {@code claude} itself when it is missing, unreadable or within
  *       5 min of expiry ({@link ClaudeTokenPreflight}), because Remote Control connects only at
  *       startup and never retries. A failed preflight is logged and the launch goes ahead.
+ *   <li><b>Credential change</b> (qits-1482): in per-session mode the keeper re-reads its {@code
+ *       front-desk} credential on every poll. When qits re-issued it — the loop toggled, a token
+ *       rotated — the kept session is terminated ({@link Desk#terminate}) and relaunched at once,
+ *       resuming its transcript, because a session's environment and MCP bearer are fixed at launch.
+ *       Legacy mode never restarts: its credential is the environment's and cannot change.
+ *   <li><b>No credential:</b> inside the grace window for qits' first {@code sessionCredentials}
+ *       the keeper waits on its poll, quietly; in per-session mode without a {@code front-desk}
+ *       credential it fails closed — a WARN and the backoff ladder, never another credential.
  *   <li><b>Not signed in</b> is not a crash to back off from: it says so once per attempt as a
  *       {@link DaemonLog} WARN and asks again every 5 min. It never opens a sign-in terminal —
  *       signing in is a person's deliberate step on the runners page.
@@ -70,7 +80,8 @@ import org.jboss.logging.Logger;
  * harness or a real wait.
  *
  * <p>The launch's credential is {@link FrontDeskCredential}'s to decide, asked before every launch:
- * the delivery token while delivering, the scrub otherwise. The delivery loop itself is {@link
+ * the {@code front-desk} session credential once qits sent credentials; before that, the delivery
+ * token while delivering and the container's own token otherwise. The delivery loop itself is {@link
  * DeliveryKeeper}'s tick, typed into {@link #keptCommandId()}.
  */
 final class FrontDeskKeeper {
@@ -140,6 +151,14 @@ final class FrontDeskKeeper {
     boolean transcriptExists(Command command, String sessionId);
 
     /**
+     * Terminate {@code commandId} (SIGTERM, then the registry's grace and escalation) — the first
+     * half of a restart onto a changed credential. False when it is not running.
+     */
+    default boolean terminate(String commandId) {
+      return false;
+    }
+
+    /**
      * Make sure the claude.ai access token is fresh before a launch (qits-1102); see {@link
      * ClaudeTokenPreflight}. Must not throw, but the keeper launches regardless if it does.
      */
@@ -180,6 +199,11 @@ final class FrontDeskKeeper {
         @Override
         public boolean transcriptExists(Command command, String sessionId) {
           return FrontDeskKeeper.transcriptExists(claudeMount, command, sessionId);
+        }
+
+        @Override
+        public boolean terminate(String commandId) {
+          return registry.terminate(commandId);
         }
       };
     }
@@ -231,6 +255,9 @@ final class FrontDeskKeeper {
   private volatile String commandId;
 
   // Touched only on the scheduler's single thread (and start(), before the first step runs).
+  private Map<String, String> launchedOverlay;
+  private boolean restarting;
+  private boolean waitingLogged;
   private long launchedAt;
   private long backoffMs;
   private String previousSessionId;
@@ -266,11 +293,13 @@ final class FrontDeskKeeper {
   }
 
   /**
-   * Begin keeping the desk, once; a no-op unless {@link Lifecycle#ALWAYS_ON} or delivering — the
-   * delivery loop needs a desk to run in, so delivery keeps one even {@link Lifecycle#ON_DEMAND}.
+   * Begin keeping the desk, once; a no-op unless {@link Lifecycle#ALWAYS_ON} or delivery is on —
+   * the delivery loop needs a desk to run in, so delivery keeps one even {@link
+   * Lifecycle#ON_DEMAND}. Whether the loop can run yet (its rights may arrive with qits' first
+   * {@code sessionCredentials}) is asked again before every launch.
    */
   void start() {
-    boolean delivering = credential.delivering();
+    boolean delivering = credential.deliveryOn();
     if (lifecycle != Lifecycle.ALWAYS_ON && !delivering) {
       LOG.debug("Lifecycle ON_DEMAND: no front desk is kept; the SPA launches one when asked.");
       return;
@@ -281,7 +310,7 @@ final class FrontDeskKeeper {
     started = true;
     if (delivering) {
       LOG.infof(
-          "Keeping the %s %s running with the delivery token; it runs the delivery loop.",
+          "Keeping the %s %s running with the desk's delivery rights; it runs the delivery loop.",
           SURFACE.key(), LABEL);
     } else {
       LOG.infof("Keeping the %s %s running.", SURFACE.key(), LABEL);
@@ -313,6 +342,17 @@ final class FrontDeskKeeper {
     if (stopped) {
       return;
     }
+    if (lifecycle != Lifecycle.ALWAYS_ON && !credential.delivering()) {
+      // Kept only for the delivery loop, and it has no rights to run with yet: no delivery token
+      // and no session credentials from qits (an older qits without a token never sends any). This
+      // is what "no token, no loop" looked like before, minus the desk; ask again on the poll.
+      if (!waitingLogged) {
+        waitingLogged = true;
+        LOG.infof("The %s waits for delivery rights before it launches.", LABEL);
+      }
+      scheduler.schedule(this::attempt, timing.pollMs());
+      return;
+    }
     try {
       if (!credential.delivering() && desk.liveSessionExists()) {
         // Somebody else's desk (the SPA's) is up. Watch it; launch when it is gone.
@@ -322,6 +362,26 @@ final class FrontDeskKeeper {
     } catch (RuntimeException e) {
       LOG.warnf("Could not ask for a live %s session: %s", LABEL, e.getMessage());
       scheduler.schedule(this::attempt, timing.pollMs());
+      return;
+    }
+    Map<String, String> overlay;
+    try {
+      overlay = credential.launchOverlay();
+    } catch (SessionCredentialStore.AwaitingSessionCredentialsException e) {
+      // Not yet, rather than no: qits has had no chance to send this desk its credentials since the
+      // daemon started or the socket connected. Ask again shortly, without spending a backoff step
+      // and without a WARN — a launch now would race the frame and run on the wrong credential.
+      LOG.debugf("%s waits for session credentials ('%s')", LABEL, e.key());
+      scheduler.schedule(this::attempt, timing.pollMs());
+      return;
+    } catch (SessionCredentialStore.MissingSessionCredentialException e) {
+      // Fail closed (qits-1482): no credential for this session's key means no session, never a
+      // session on another credential. qits may issue one any moment, so ask again on the ladder;
+      // the previous session stays resumable, since nothing about it was refused.
+      String message = LABEL + " not launched: no session credential for '" + e.key() + "'";
+      LOG.warn(message);
+      send.accept(new DaemonLog("WARN", message));
+      scheduler.schedule(this::attempt, nextBackoff());
       return;
     }
     try {
@@ -348,7 +408,7 @@ final class FrontDeskKeeper {
                   false,
                   null,
                   null,
-                  credential.launchOverlay()));
+                  overlay));
     } catch (AgentNotSignedInException e) {
       String message = LABEL + " not signed in: run the login command on the runners page";
       LOG.warn(message);
@@ -364,8 +424,15 @@ final class FrontDeskKeeper {
       return;
     }
     commandId = command.id();
+    launchedOverlay = overlay;
     launchedAt = clock.getAsLong();
-    if (pendingExitCode != null) {
+    if (restarting) {
+      restarting = false;
+      pendingExitCode = null;
+      String message = LABEL + " restarted on its new session credential";
+      LOG.info(message);
+      send.accept(new DaemonLog("INFO", message));
+    } else if (pendingExitCode != null) {
       String message = LABEL + " relaunched (exit " + pendingExitCode + ")";
       LOG.info(message);
       send.accept(new DaemonLog("INFO", message));
@@ -398,6 +465,18 @@ final class FrontDeskKeeper {
       if (now - launchedAt >= timing.resetAfterMs()) {
         backoffMs = timing.initialBackoffMs();
       }
+      if (!restarting && credentialChanged()) {
+        // qits re-issued the front desk's credential (the loop toggled, a token rotated): the
+        // session's environment and MCP bearer are fixed at launch, so it is restarted onto the new
+        // one, resuming its transcript. SIGTERM first, so remote control archives cleanly.
+        restarting = true;
+        LOG.infof("%s: its session credential changed; restarting it (command %s)", LABEL, commandId);
+        try {
+          desk.terminate(commandId);
+        } catch (RuntimeException e) {
+          LOG.warnf("Could not terminate the %s for its restart: %s", LABEL, e.getMessage());
+        }
+      }
       scheduler.schedule(this::poll, timing.pollMs());
       return;
     }
@@ -416,13 +495,31 @@ final class FrontDeskKeeper {
     Integer code = exited == null ? null : exited.exitCode();
     pendingExitCode = code == null ? -1 : code;
     commandId = null;
-    long delay = nextBackoff();
+    // A restart onto a new credential is not a crash: relaunch at once, without a backoff step.
+    long delay = restarting ? 0 : nextBackoff();
     LOG.debugf(
         "%s exited (exit %d); relaunching in %d ms",
         LABEL,
         (Object) pendingExitCode,
         (Object) delay);
     scheduler.schedule(this::attempt, delay);
+  }
+
+  /**
+   * Whether the credential the kept session was launched with is no longer the one it would be
+   * launched with now. Only ever true in per-session mode — a legacy credential is read from the
+   * environment and cannot change — and only for a credential that is there: a key qits withdrew
+   * leaves the running session alone (its next launch fails closed), as does the grace window.
+   */
+  private boolean credentialChanged() {
+    if (launchedOverlay == null || !credential.perSessionMode()) {
+      return false;
+    }
+    try {
+      return !credential.launchOverlay().equals(launchedOverlay);
+    } catch (RuntimeException e) {
+      return false;
+    }
   }
 
   /** The current backoff, doubling the next one up to the cap. */

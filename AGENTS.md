@@ -45,11 +45,15 @@ library declares:
     FrontDeskKeeper         keeping the project.work front desk running when the lifecycle is ALWAYS_ON or
                             delivery is on; started after the follower, only on a successful provision with
                             agents wired; while delivering it tracks and keeps ITS OWN command
-    FrontDeskCredential     the one seam deciding the front desk launch's credential: the delivery token as
-                            QITS_TOKEN while delivering, the scrub otherwise (qits-1482 swaps only this)
+    FrontDeskCredential     the one seam deciding the front desk launch's credential: the `front-desk` session
+                            credential once qits sent any; before that (legacy) the delivery token as
+                            QITS_TOKEN while delivering, the container's own token otherwise
     DeliveryKeeper          the delivery tick: one "Run one pass of the delivery loop" turn per interval,
                             typed into the keeper's own front desk when idle; writes the loop's brief
-    DeliveryCredentials     keeping QITS_DELIVERY_TOKEN(_SUBJECT) out of every child but the keeper's front desk
+    DaemonSecrets           keeping the daemon's secrets — QITS_DELIVERY_TOKEN(_SUBJECT), the API token,
+                            its own QITS_TOKEN(_SUBJECT) — out of every child that is not meant to hold them
+    SessionCredentialStore  the per-session tokens qits sends over the control socket, by session key, and
+                            the grace window before legacy mode
 
 Both library modules are framework-free — no CDI, no JAX-RS, no Jackson — so they cannot read
 configuration. `ControlSocket` is the single reader and hands every setting down as a constructor
@@ -94,7 +98,8 @@ A change to the protocol is therefore:
    is gated by *its* release request. That is slower than editing a vendored copy and it is the
    point — the host that must understand a frame is the one whose gate now sees the change.
 
-Bump `CAPABILITY_VERSION` whenever the backend must branch on the change. It starts at **1**, not
+Bump `CAPABILITY_VERSION` whenever the backend must branch on the change (2: `sessionCredentials`,
+qits-1482 — sent only to a daemon announcing 2). It starts at **1**, not
 at the workspace daemon's 4: the two protocols share a shape and a lineage but not a namespace,
 and a shared number would suggest a compatibility relation that does not exist. Version 1 already
 binds loopback and serves `OpenStream`, which the workspace daemon only reached at 4 — there is no
@@ -376,8 +381,13 @@ derive fails at the boundary instead of far from it.
     QITS_COMMISSIONED_CLIENT_SECRET      its one-time secret
     QITS_TOKEN                           runner-placed (edge) container's project token; set ⇒ it is the bearer on the
                                          control socket, every dial-back, the clone's git header and the qits
-                                         MCP server, and NOTHING is minted; absent ⇒ the pair above (client_secret_post)
+                                         MCP server, and NOTHING is minted; absent ⇒ the pair above (client_secret_post).
+                                         The daemon's own: its git/maintenance children keep it, no session inherits it
+                                         (DaemonSecrets) — a session runs on its own credential, see below
     QITS_TOKEN_SUBJECT                   whom that token names; read for the boot log only
+    QITS_PROJECTS_DAEMON_SESSION_CREDENTIALS_GRACE  ISO-8601, default PT20S: how long a launch waits for qits'
+                                         first sessionCredentials frame before legacy mode, from daemon start and
+                                         again from the first connection
     QITS_PROJECTS_DAEMON_LIFECYCLE       ALWAYS_ON | ON_DEMAND (default; anything else ⇒ one WARN, ON_DEMAND);
                                          ALWAYS_ON keeps a project.work front-desk session running (FrontDeskKeeper):
                                          launched at boot unless one is live, relaunched on exit (5 s doubling to
@@ -398,12 +408,13 @@ derive fails at the boundary instead of far from it.
                                          follow it. (tick <instant>)" — only while that command is RUNNING and its
                                          last hook-reported state is IDLE (no draft); otherwise the tick is
                                          skipped at DEBUG, never queued
-    QITS_DELIVERY_TOKEN                  the desk's delivery token (desk-delivery commission, qits:desk); the
-                                         keeper's front desk gets it as its QITS_TOKEN (and so as its qits MCP
-                                         bearer), decided in one place, FrontDeskCredential
+    QITS_DELIVERY_TOKEN                  LEGACY MODE ONLY (no sessionCredentials frame): the desk's delivery token
+                                         (desk-delivery commission, qits:desk); the keeper's front desk gets it as
+                                         its QITS_TOKEN (and so as its qits MCP bearer), decided in one place,
+                                         FrontDeskCredential. Once a frame arrived it is not read
     QITS_DELIVERY_TOKEN_SUBJECT          whom it names; the front desk's QITS_TOKEN_SUBJECT. NEITHER name reaches
                                          any child as itself, and the token reaches no child but the keeper's
-                                         front desk (DeliveryCredentials): every other launch — /agents
+                                         front desk (DaemonSecrets): every other launch — /agents
                                          project.work and project.delivery included — gets an overlay mapping
                                          both to "" (removed), and the daemon's own spawns — RunCommand, the
                                          checkout follower, the git reads, the probes, the sign-in terminal —
@@ -414,6 +425,55 @@ the agent configuration document is materialized — the only time that document
 `project.delivery` surface's `systemPrompt` from that document; absent or blank ⇒ a short fallback telling
 the session to read its rules with `qits projects delivery --project <projectId>` and do one pass. The
 `project.delivery` surface is only the brief's store: nothing launches it.
+
+## No child holds the daemon's secrets, and each session runs on its own token (qits-1482)
+
+**The API token reaches no child.** `QITS_PROJECTS_DAEMON_API_TOKEN` is read by `ProjectsApi` through
+configuration and by nothing else. A child that held it could attach to another session's terminal
+over the loopback API and type into it — a confused deputy no token isolation stops — so every spawn
+loses it.
+
+**What each spawn keeps** (`DaemonSecrets`):
+
+    agent launches (front desk, POST /agents)     all five scrubbed, then the session's own QITS_TOKEN laid on
+    RunCommand (CommandExecutor)                  all five removed
+    declared actions (POST /commands)             all five blank, via the ActionResolver seam (CommandService
+                                                  has no env/process seam; its registry cannot remove a name)
+    checkout follower, Provisioner, git reads     delivery token + API token removed; QITS_TOKEN KEPT
+    sign-in terminal, probes, token preflight     all five blank (the library's seams cannot express a removal)
+
+The daemon's own git and maintenance processes keep `QITS_TOKEN` because they need it: the base
+image's `/usr/local/bin/qits-git-credential` (named by `/etc/qits-gitconfig`) answers qits-githost with
+`QITS_TOKEN` when set — a desk carries no commissioned pair to fall back on — and `qits
+checkout-daemon` picks its edge-token mode off the same name.
+
+**Per-session credentials ride the control socket** (`sessionCredentials`, capability 2). qits sends
+the full list — `[{key, token, subject}]` — on `hello` and on every change; the daemon holds it in
+memory (`SessionCredentialStore`), replaced wholesale per frame. Two keys, plus an entity id per
+refinement session later (qits-770):
+
+    front-desk    the ONE front desk session (FrontDeskKeeper), which runs the delivery loop as turns.
+                  qits puts the desk-delivery token (qits:agent + qits:desk) here while the loop is on,
+                  a desk-session token (qits:agent) otherwise
+    desk-agents   every POST /agents launch — a person's sessions from the desk panel, whatever surface.
+                  A desk-session token: a person-started session never holds qits:desk
+
+- **Waiting** — no frame yet, grace window open (PT20S from daemon start, and again from the control
+  socket's first connection, right after `hello`): the keeper retries on its 2 s poll without a WARN
+  or a backoff step; `POST /agents` answers 503 "Waiting for session credentials…" with `Retry-After: 5`.
+- **Legacy mode** — no frame and the window passed (an older qits): exactly the pre-1482 behaviour.
+  The front desk runs on `QITS_DELIVERY_TOKEN` while delivering (on + token), else on the container's
+  own `QITS_TOKEN`; `POST /agents` on the container's own token, NEVER the delivery token. One INFO.
+- **Per-session mode** — from the first frame on, for the life of the process. The front desk runs on
+  `front-desk`, `POST /agents` on `desk-agents`; a missing key **fails closed** (keeper: WARN + backoff
+  ladder; `POST /agents`: 503), never another credential. With delivery on, the loop needs no env
+  token: the `front-desk` credential carries the rights.
+- **Credential change** — the keeper re-reads `front-desk` on every poll. When a frame changed its token
+  or subject (the loop toggled, a rotation), the kept command is terminated (`CommandRegistry.terminate`)
+  and relaunched at once, resuming its transcript, so the new environment and MCP bearer take effect.
+  An unchanged frame, a withdrawn key and legacy mode restart nothing.
+
+Token values are never logged; keys and subjects are.
 
 **The front desk refreshes the claude.ai token before every launch** (qits-1102, `ClaudeTokenPreflight`).
 `claude --remote-control` connects Remote Control once, at startup, on whatever access token

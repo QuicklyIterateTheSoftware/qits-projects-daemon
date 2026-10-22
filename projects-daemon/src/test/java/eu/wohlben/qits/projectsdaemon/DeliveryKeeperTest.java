@@ -50,16 +50,15 @@ class DeliveryKeeperTest {
   private static final String SUBJECT = "desk-delivery:p-1";
 
   /** What the front desk launches with while delivering. */
-  private static final Map<String, String> DELIVERY_OVERLAY =
-      Map.of(
-          "QITS_TOKEN",
-          TOKEN,
-          "QITS_TOKEN_SUBJECT",
-          SUBJECT,
-          "QITS_DELIVERY_TOKEN",
-          "",
-          "QITS_DELIVERY_TOKEN_SUBJECT",
-          "");
+  private static final Map<String, String> DELIVERY_OVERLAY = deliveryOverlay();
+
+  /** Every daemon secret scrubbed (qits-1482), then the delivery token as the session's own. */
+  private static Map<String, String> deliveryOverlay() {
+    Map<String, String> overlay = new java.util.HashMap<>(DaemonSecrets.SCRUB);
+    overlay.put("QITS_TOKEN", TOKEN);
+    overlay.put("QITS_TOKEN_SUBJECT", SUBJECT);
+    return Map.copyOf(overlay);
+  }
 
   // --- the virtual clock and scheduler --------------------------------------------------------
 
@@ -219,7 +218,7 @@ class DeliveryKeeperTest {
     frontDesk =
         new FrontDeskKeeper(
             lifecycle,
-            new FrontDeskCredential(settings),
+            new FrontDeskCredential(settings, SessionCredentialStore.withoutOwnToken()),
             desk,
             TIMING,
             new VirtualScheduler(),
@@ -251,16 +250,22 @@ class DeliveryKeeperTest {
     start(Lifecycle.ALWAYS_ON, null, TOKEN);
     advance(INTERVAL.toMillis() * 3);
     assertEquals(1, desk.launches.size());
-    assertEquals(DeliveryCredentials.SCRUB, desk.launches.getFirst().environment());
+    assertEquals(DaemonSecrets.SCRUB, desk.launches.getFirst().environment());
     assertTrue(desk.typed.isEmpty(), "delivery off: no tick");
   }
 
+  /**
+   * On without a token, and no session credentials (legacy mode): no rights, so no desk and no
+   * tick reaches anything — as before. The keeper and the tick stay scheduled, quietly, because a
+   * newer qits hands the rights over the control socket instead (qits-1482).
+   */
   @Test
-  void onWithoutATokenIsOff() {
+  void onWithoutATokenLaunchesAndTypesNothingInLegacyMode() {
     start(Lifecycle.ON_DEMAND, "on", " ");
     advance(INTERVAL.toMillis() * 3);
     assertEquals(0, desk.launches.size());
-    assertTrue(tasks.isEmpty());
+    assertTrue(desk.typed.isEmpty());
+    assertEquals(0, tick.consecutiveSkips(), "no rights is not a run of skips");
   }
 
   // --- the launch -----------------------------------------------------------------------------
@@ -328,6 +333,50 @@ class DeliveryKeeperTest {
   }
 
   // --- the tick -------------------------------------------------------------------------------
+
+  /**
+   * Per-session mode (qits-1482): no delivery token in the environment, the rights arrive as the
+   * front-desk credential — the desk launches on it and the tick reaches it, wired as {@link
+   * ControlSocket#wireAgents} wires both halves.
+   */
+  @Test
+  void perSessionModeTicksTheDeskOnItsFrontDeskCredentialWithoutAnEnvToken() {
+    DeliveryKeeper.Settings settings =
+        DeliveryKeeper.Settings.parse(
+            Optional.of("on"), Optional.of("PT10M"), Optional.empty(), Optional.empty());
+    SessionCredentialStore credentials = SessionCredentialStore.withoutOwnToken();
+    credentials.replace(
+        new eu.wohlben.qits.projectsdaemon.protocol.SessionCredentials(
+            List.of(
+                new eu.wohlben.qits.projectsdaemon.protocol.SessionCredentials.Credential(
+                    "front-desk", "qits_tok_dd", "tok-dd"))));
+    FrontDeskCredential credential = new FrontDeskCredential(settings, credentials);
+    frontDesk =
+        new FrontDeskKeeper(
+            Lifecycle.ON_DEMAND,
+            credential,
+            desk,
+            TIMING,
+            new VirtualScheduler(),
+            () -> now,
+            message -> {});
+    tick =
+        new DeliveryKeeper(
+            settings,
+            credential::delivering,
+            frontDesk::keptCommandId,
+            desk,
+            new VirtualScheduler(),
+            () -> now);
+    frontDesk.start();
+    tick.start();
+    advance(0);
+
+    assertEquals(1, desk.launches.size());
+    assertEquals("qits_tok_dd", desk.launches.getFirst().environment().get("QITS_TOKEN"));
+    advance(INTERVAL.toMillis());
+    assertEquals(1, desk.typed.size(), "the loop runs on the frame's rights");
+  }
 
   @Test
   void theTickIsTypedWhenTheDeskIsIdle() {

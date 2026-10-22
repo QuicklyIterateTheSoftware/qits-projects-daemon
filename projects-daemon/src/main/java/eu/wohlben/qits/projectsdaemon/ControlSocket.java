@@ -31,6 +31,7 @@ import eu.wohlben.qits.projectsdaemon.protocol.ProjectChanged;
 import eu.wohlben.qits.projectsdaemon.protocol.ProvisionFailed;
 import eu.wohlben.qits.projectsdaemon.protocol.Provisioned;
 import eu.wohlben.qits.projectsdaemon.protocol.RunCommand;
+import eu.wohlben.qits.projectsdaemon.protocol.SessionCredentials;
 import io.vertx.core.Context;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.WebSocket;
@@ -264,7 +265,7 @@ public class ControlSocket {
   /**
    * The desk's delivery token ({@code QITS_DELIVERY_TOKEN}), handed to the keeper's front desk
    * session as its {@code QITS_TOKEN} ({@link FrontDeskCredential}) and to no other child ({@link
-   * DeliveryCredentials}). Unset means no delivery loop, whatever {@link #delivery} says.
+   * DaemonSecrets}). Unset means no delivery loop, whatever {@link #delivery} says.
    */
   @ConfigProperty(name = "qits.projects-daemon.delivery-token")
   Optional<String> deliveryToken;
@@ -272,6 +273,14 @@ public class ControlSocket {
   /** Whom {@link #deliveryToken} names ({@code QITS_DELIVERY_TOKEN_SUBJECT}). */
   @ConfigProperty(name = "qits.projects-daemon.delivery-token-subject")
   Optional<String> deliveryTokenSubject;
+
+  /**
+   * How long a launch waits for qits' first {@link SessionCredentials} frame before it falls back to
+   * legacy mode ({@code …_SESSION_CREDENTIALS_GRACE}, ISO-8601, PT20S), measured from daemon start
+   * and again from the first connection. See {@link SessionCredentialStore}.
+   */
+  @ConfigProperty(name = "qits.projects-daemon.session-credentials-grace")
+  Optional<String> sessionCredentialsGrace;
 
   /** Whether launches wire the turn-boundary activity hooks; the lineage hook is unconditional. */
   @ConfigProperty(name = "qits.agent.activity-tracking-enabled", defaultValue = "true")
@@ -388,6 +397,16 @@ public class ControlSocket {
   volatile DeliveryKeeper deliveryTick;
 
   /**
+   * The per-session credentials qits sends over this socket ({@link SessionCredentials},
+   * qits-1482), which every agent launch picks its {@code QITS_TOKEN} from. Until the first frame
+   * — an older qits sends none — launches run as they did before it (legacy mode).
+   */
+  final SessionCredentialStore sessionCredentials =
+      new SessionCredentialStore(
+          () -> rawProjectToken().orElse(""),
+          () -> tokenSubject == null ? "" : tokenSubject.orElse(""));
+
+  /**
    * The live terminal and chat sessions {@link #wireCapabilities} spawns — held so {@link #stop}
    * can terminate them ahead of everything else. See {@link #stopAgents} for why that ordering
    * matters.
@@ -433,6 +452,9 @@ public class ControlSocket {
    * want of a socket.
    */
   public void start() {
+    // First: the grace window for qits' sessionCredentials frame is measured from daemon start, so
+    // a daemon that never connects still launches, one window later, in legacy mode.
+    sessionCredentials.openWindow(SessionCredentialStore.parseGrace(sessionCredentialsGrace));
     projectId = projectIdConfig.orElse("");
     repoName = repoNameConfig.orElse("");
     // Before anything is started, and deliberately so: a document that cannot be trusted must fail
@@ -625,7 +647,13 @@ public class ControlSocket {
     commands = commandRegistry;
     CommandService commandService =
         new CommandService(
-            store, commandRegistry, lifecycle, logs, context, new NoDeclaredActions());
+            store,
+            commandRegistry,
+            lifecycle,
+            logs,
+            context,
+            // Declared actions lose every daemon secret, like RunCommand (DaemonSecrets).
+            DaemonSecrets.actions(new NoDeclaredActions()));
     projectsApi.wireCommands(commandService, commandRegistry, context);
     wireAgents(store, logs, commandService, commandRegistry, context);
     projectsApi.start();
@@ -657,8 +685,8 @@ public class ControlSocket {
             DaemonAgentDefaults.factsOf(projectId, repoName),
             domainConfig,
             workLinkProjects);
-    // Every probe and preflight child sees the delivery credential blank (DeliveryCredentials).
-    ProcessRunner processes = DeliveryCredentials.processes(new LocalProcessExecutor());
+    // Every probe and preflight child sees every daemon secret blank (DaemonSecrets).
+    ProcessRunner processes = DaemonSecrets.processes(new LocalProcessExecutor());
     AgentTranscriptService transcripts =
         new AgentTranscriptService(
             store, logs, agentSessionStore, claudeMount, () -> nudge(ChangeTopic.COMMANDS));
@@ -668,9 +696,9 @@ public class ControlSocket {
     this.transcriptTail = tail;
     AgentAuthStatus authStatus = new AgentAuthStatus(processes, claudeMount, WORKSPACE_DIR.toPath());
     // Every session spawned through it — the sign-in terminal included, which takes no overlay —
-    // sees the delivery credential blank unless its launch decided otherwise (DeliveryCredentials).
+    // sees every daemon secret blank unless its launch decided otherwise (DaemonSecrets).
     AgentCommands agentCommands =
-        DeliveryCredentials.commands(
+        DaemonSecrets.commands(
             new CommandsAgentCommands(commandService, commandRegistry, store));
     AgentLaunchService launch =
         new AgentLaunchService(
@@ -706,10 +734,12 @@ public class ControlSocket {
     DeliveryKeeper.Settings deliverySettings =
         DeliveryKeeper.Settings.parse(
             delivery, deliveryInterval, deliveryToken, deliveryTokenSubject);
+    FrontDeskCredential frontDeskCredential =
+        new FrontDeskCredential(deliverySettings, sessionCredentials);
     FrontDeskKeeper keeper =
         new FrontDeskKeeper(
             FrontDeskKeeper.Lifecycle.parse(lifecycle),
-            new FrontDeskCredential(deliverySettings),
+            frontDeskCredential,
             FrontDeskKeeper.Desk.of(launch, store, commandRegistry, claudeMount, preflight),
             FrontDeskKeeper.Timing.DEFAULT,
             FrontDeskKeeper.Scheduler.worker(),
@@ -719,6 +749,7 @@ public class ControlSocket {
     deliveryTick =
         new DeliveryKeeper(
             deliverySettings,
+            frontDeskCredential::delivering,
             keeper::keptCommandId,
             DeliveryKeeper.Session.of(
                 store,
@@ -730,6 +761,7 @@ public class ControlSocket {
                 }),
             FrontDeskKeeper.Scheduler.worker(),
             System::currentTimeMillis);
+    projectsApi.wireSessions(sessionCredentials);
     projectsApi.wireAgents(
         launch,
         new AgentSessionQueryService(store, agentSessionStore),
@@ -1005,6 +1037,9 @@ public class ControlSocket {
       flushPending(ws);
       socket = ws;
     }
+    // The hello is on the wire: a capability-2 qits answers with sessionCredentials, so the grace
+    // window restarts from here (the first connection only).
+    sessionCredentials.connectionOpened();
     // Reconnect adoption: re-report the last known agent activity per tracked command, so a qits
     // restart rebuilds the live "cooking / idle / waiting" projection from the daemon's retained
     // state. Off the socket-publish path (after `socket = ws`) so the re-report writes directly.
@@ -1039,6 +1074,9 @@ public class ControlSocket {
       case RunCommand command -> workers.execute(() -> CommandExecutor.run(command, this::send));
       case Describe ignored ->
           workers.execute(() -> send(ProjectDescriber.describe(projectId, repoName)));
+      case SessionCredentials frame ->
+          // Replace semantics, held in memory only; the store logs keys and subjects, never tokens.
+          sessionCredentials.replace(frame);
       case OpenStream request -> {
         // On the event loop: both connects are non-blocking futures and the pumps are
         // handler-driven, so there is nothing here worth a worker thread.

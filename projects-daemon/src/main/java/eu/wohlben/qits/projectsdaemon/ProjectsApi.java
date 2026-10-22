@@ -1,6 +1,7 @@
 package eu.wohlben.qits.projectsdaemon;
 
 import eu.wohlben.qits.agents.AgentDefaults;
+import eu.wohlben.qits.agents.AgentLaunchRequest;
 import eu.wohlben.qits.agents.AgentLaunchService;
 import eu.wohlben.qits.agents.AgentNotSignedInException;
 import eu.wohlben.qits.agents.AgentSessionQueryService;
@@ -14,6 +15,7 @@ import eu.wohlben.qits.commands.CommandStatus;
 import eu.wohlben.qits.commands.InvalidCommandRequestException;
 import eu.wohlben.qits.commands.LogChannel;
 import eu.wohlben.qits.commands.LogSeverity;
+import eu.wohlben.qits.projectsdaemon.protocol.SessionCredentials;
 import io.vertx.core.Context;
 import io.vertx.core.Future;
 import io.vertx.core.MultiMap;
@@ -86,7 +88,15 @@ import org.jboss.logging.Logger;
  * <p>So the API requires a shared secret, {@code qits.projects-daemon.api-token} (injected as
  * {@code QITS_PROJECTS_DAEMON_API_TOKEN}), presented as {@code Authorization: Bearer <token>}.
  * Compared with {@link MessageDigest#isEqual} so a mismatch costs the same time whatever the
- * prefix, and never logged or echoed.
+ * prefix, and never logged or echoed. <b>No child of this daemon holds it</b> ({@link
+ * DaemonSecrets}, qits-1482): a session that could present it could attach to another session's
+ * terminal and type there, so it is scrubbed from every spawn, and this class is its only reader.
+ *
+ * <p><b>Whose credential a launch runs on.</b> {@code POST /agents} is a person at the desk panel,
+ * so it runs on the {@code desk-agents} session credential ({@link SessionCredentialStore}) — a
+ * desk-session token, never the desk's delivery rights — whatever surface it names; with none
+ * issued it answers 503 and launches nothing. Before qits sent any credential it runs on the
+ * container's own token, never on {@code QITS_DELIVERY_TOKEN}.
  *
  * <p><b>Absent token ⇒ the server does not bind at all</b>, with a warning. Fail-closed rather than
  * fail-open is the deliberate choice: an omitted env is indistinguishable from a misconfiguration,
@@ -225,6 +235,14 @@ public class ProjectsApi {
   /** Who took the report — this container, named for the project it serves. */
   private volatile String reportedBy = "";
 
+  /**
+   * The credentials a person's launch runs on: the {@code desk-agents} key's (qits-1482). Until
+   * {@link #wireSessions} a store with no own token, so a test that never wires one launches with
+   * {@code QITS_TOKEN} removed rather than inherited.
+   */
+  private volatile SessionCredentialStore sessionCredentials =
+      SessionCredentialStore.withoutOwnToken();
+
   /** Wire the commands surface. */
   void wireCommands(
       CommandService commands, CommandRegistry registry, ProjectContext projectContext) {
@@ -265,6 +283,15 @@ public class ProjectsApi {
     this.agentCapabilities = agentCapabilities == null ? List.of() : List.copyOf(agentCapabilities);
     this.imageVersion = imageVersion == null ? "" : imageVersion;
     this.reportedBy = reportedBy == null ? "" : reportedBy;
+  }
+
+  /**
+   * Wire the session credentials a launch from the desk panel runs on. {@link ControlSocket} calls
+   * it beside {@link #wireAgents}.
+   */
+  void wireSessions(SessionCredentialStore sessionCredentials) {
+    this.sessionCredentials =
+        sessionCredentials == null ? SessionCredentialStore.withoutOwnToken() : sessionCredentials;
   }
 
   /**
@@ -405,8 +432,18 @@ public class ProjectsApi {
     respond(request, 404, ProjectsJson.error("No such endpoint"));
   }
 
-  /** One answered request: the status and the body that goes with it. */
-  private record Reply(int status, JsonObject body) {}
+  /**
+   * One answered request: the status, the body that goes with it, and a {@code Retry-After} in
+   * seconds when the answer is "not yet" (null otherwise).
+   */
+  private record Reply(int status, JsonObject body, Integer retryAfterSeconds) {
+    Reply(int status, JsonObject body) {
+      this(status, body, null);
+    }
+  }
+
+  /** The {@code Retry-After} a launch deferred for session credentials answers with. */
+  static final int SESSION_CREDENTIALS_RETRY_AFTER_SECONDS = 5;
 
   /** Route and run, given the request's method and its (already read) body. */
   private interface Dispatch {
@@ -440,7 +477,13 @@ public class ProjectsApi {
                 workers.execute(
                     () -> {
                       Reply reply = dispatch.apply(method, body.toString());
-                      context.runOnContext(v -> respond(request, reply.status(), reply.body()));
+                      context.runOnContext(
+                          v ->
+                              respond(
+                                  request,
+                                  reply.status(),
+                                  reply.body(),
+                                  reply.retryAfterSeconds()));
                     });
               } catch (RejectedExecutionException shuttingDown) {
                 // The pool is gone (a request that raced @PreDestroy). Answer rather than let the
@@ -480,14 +523,15 @@ public class ProjectsApi {
             : new Reply(405, ProjectsJson.error("Method not allowed"));
       }
       if (AGENTS_PATH.equals(path)) {
-        return method == HttpMethod.POST
-            ? new Reply(
-                200,
-                AgentJson.launched(
-                    agentLaunch.launch(AgentJson.launchRequest(jsonBody(body))),
-                    projectContext.projectId(),
-                    projectContext.repoName()))
-            : new Reply(405, ProjectsJson.error("Method not allowed"));
+        if (method != HttpMethod.POST) {
+          return new Reply(405, ProjectsJson.error("Method not allowed"));
+        }
+        return new Reply(
+            200,
+            AgentJson.launched(
+                agentLaunch.launch(personLaunch(AgentJson.launchRequest(jsonBody(body)))),
+                projectContext.projectId(),
+                projectContext.repoName()));
       }
       if (AGENTS_SIGN_IN_PATH.equals(path)) {
         return method == HttpMethod.POST
@@ -507,6 +551,18 @@ public class ProjectsApi {
       return new Reply(404, ProjectsJson.error("No such endpoint"));
     } catch (CommandNotFoundException e) {
       return new Reply(404, ProjectsJson.error(e.getMessage()));
+    } catch (SessionCredentialStore.AwaitingSessionCredentialsException e) {
+      // Not refused, not yet: the daemon is inside its grace window for qits' sessionCredentials
+      // frame, and a launch now would run on the container's token for its whole life.
+      return new Reply(
+          503,
+          ProjectsJson.error(WAITING_FOR_SESSION_CREDENTIALS),
+          SESSION_CREDENTIALS_RETRY_AFTER_SECONDS);
+    } catch (SessionCredentialStore.MissingSessionCredentialException e) {
+      // Fail closed (qits-1482): qits has issued this desk no credential for the session, and a
+      // launch never falls back to the container's own token. Retryable once qits sends one.
+      LOG.warnf("Refused a launch: no session credential for '%s'", e.key());
+      return new Reply(503, ProjectsJson.error(e.getMessage()));
     } catch (AgentNotSignedInException e) {
       // 409, and NOT the 500 this would otherwise fall through to. A signed-out platform is not a
       // broken one, and "Internal error" — which is what the ladder below deliberately answers,
@@ -527,6 +583,22 @@ public class ProjectsApi {
       LOG.errorf(e, "projects-daemon agents API failed handling %s", path);
       return new Reply(500, ProjectsJson.error("Internal error"));
     }
+  }
+
+  /** The 503 a launch deferred for session credentials answers with, beside a Retry-After. */
+  static final String WAITING_FOR_SESSION_CREDENTIALS =
+      "Waiting for session credentials from qits; retry in a few seconds.";
+
+  /**
+   * A launch a person started from the desk panel, on the {@code desk-agents} session credential
+   * whatever surface it names: no browser-started session holds the desk's delivery rights. In
+   * legacy mode the container's own token — the delivery token is never a fallback here. Throws
+   * {@link SessionCredentialStore.MissingSessionCredentialException} when there is none, and {@link
+   * SessionCredentialStore.AwaitingSessionCredentialsException} inside the grace window.
+   */
+  AgentLaunchRequest personLaunch(AgentLaunchRequest request) {
+    return DaemonSecrets.launchedAs(
+        request, sessionCredentials.overlayFor(SessionCredentials.DESK_AGENTS_KEY));
   }
 
   /**
@@ -669,7 +741,15 @@ public class ProjectsApi {
 
   /** Write one JSON answer. Always runs on the request's context, never throws. */
   private static void respond(HttpServerRequest request, int status, JsonObject body) {
+    respond(request, status, body, null);
+  }
+
+  private static void respond(
+      HttpServerRequest request, int status, JsonObject body, Integer retryAfterSeconds) {
     try {
+      if (retryAfterSeconds != null) {
+        request.response().putHeader("Retry-After", String.valueOf(retryAfterSeconds));
+      }
       request
           .response()
           .setStatusCode(status)

@@ -70,7 +70,7 @@ public final class ProjectDescriber {
           new ProcessBuilder(argv)
               .redirectError(ProcessBuilder.Redirect.DISCARD)
               .directory(WORKSPACE_DIR);
-      DeliveryCredentials.scrub(builder.environment());
+      DaemonSecrets.scrubDaemon(builder.environment());
       Process process = builder.start();
       byte[] out = process.getInputStream().readAllBytes();
       if (!process.waitFor(10, TimeUnit.SECONDS)) {

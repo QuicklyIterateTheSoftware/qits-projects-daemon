@@ -124,10 +124,15 @@ class AgentJsonTest {
           AgentJson.launchRequest(
               new JsonObject().put("scope", "REPOSITORY").put("surface", surface));
 
+      assertEquals(DaemonSecrets.SCRUB, request.environment(), surface);
       assertEquals(
-          Map.of("QITS_DELIVERY_TOKEN", "", "QITS_DELIVERY_TOKEN_SUBJECT", ""),
-          request.environment(),
-          surface);
+          Map.of(
+              "QITS_DELIVERY_TOKEN", "",
+              "QITS_DELIVERY_TOKEN_SUBJECT", "",
+              "QITS_PROJECTS_DAEMON_API_TOKEN", "",
+              "QITS_TOKEN", "",
+              "QITS_TOKEN_SUBJECT", ""),
+          DaemonSecrets.SCRUB);
     }
   }
 

@@ -32,8 +32,9 @@ public final class CommandExecutor {
   public static void run(RunCommand command, Consumer<DaemonMessage> emit) {
     String correlationId = command.correlationId();
     ProcessBuilder builder = new ProcessBuilder(command.argv());
-    // The delivery token is for the keeper's front desk session alone (DeliveryCredentials).
-    DeliveryCredentials.scrub(builder.environment());
+    // A process qits asks for runs as nobody in particular: no delivery token, no API token and not
+    // the container's own token either (DaemonSecrets).
+    DaemonSecrets.scrubSession(builder.environment());
     if (command.cwd() != null && !command.cwd().isBlank()) {
       builder.directory(new File(command.cwd()));
     }

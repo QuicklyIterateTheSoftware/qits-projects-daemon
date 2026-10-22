@@ -502,7 +502,9 @@ public final class Provisioner {
       File workingDir,
       Consumer<DaemonMessage> emit) {
     ProcessBuilder builder = new ProcessBuilder(argv);
-    DeliveryCredentials.scrub(builder.environment());
+    // The clone and its submodule fetches act as the container: they keep QITS_TOKEN, which the git
+    // credential helper answers with, and lose everything else (DaemonSecrets).
+    DaemonSecrets.scrubDaemon(builder.environment());
     builder.environment().putAll(environment);
     if (workingDir != null && workingDir.isDirectory()) {
       builder.directory(workingDir);
@@ -577,7 +579,7 @@ public final class Provisioner {
     try {
       ProcessBuilder builder =
           new ProcessBuilder(argv).redirectError(ProcessBuilder.Redirect.DISCARD);
-      DeliveryCredentials.scrub(builder.environment());
+      DaemonSecrets.scrubDaemon(builder.environment());
       if (workingDir != null && workingDir.isDirectory()) {
         builder.directory(workingDir);
       }

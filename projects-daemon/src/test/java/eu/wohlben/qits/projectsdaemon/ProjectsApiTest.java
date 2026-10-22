@@ -1,13 +1,16 @@
 package eu.wohlben.qits.projectsdaemon;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import eu.wohlben.qits.agents.AgentLaunchService;
 import eu.wohlben.qits.commands.CommandLifecycleService;
 import eu.wohlben.qits.commands.CommandLogService;
 import eu.wohlben.qits.commands.CommandRegistry;
 import eu.wohlben.qits.commands.CommandService;
 import eu.wohlben.qits.commands.CommandStore;
+import eu.wohlben.qits.projectsdaemon.protocol.SessionCredentials;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
@@ -15,6 +18,8 @@ import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.RequestOptions;
 import io.vertx.core.json.JsonObject;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
@@ -101,7 +106,11 @@ class ProjectsApiTest {
     }
   }
 
-  private record Answer(int status, JsonObject body) {}
+  private record Answer(int status, JsonObject body, String retryAfter) {
+    Answer(int status, JsonObject body) {
+      this(status, body, null);
+    }
+  }
 
   private Answer get(String path, String bearer) {
     RequestOptions options =
@@ -119,6 +128,50 @@ class ProjectsApiTest {
             .compose(
                 response ->
                     response.body().map(body -> new Answer(response.statusCode(), new JsonObject(body)))));
+  }
+
+  private Answer post(String path, String bearer, JsonObject body) {
+    RequestOptions options =
+        new RequestOptions()
+            .setHost("127.0.0.1")
+            .setPort(port)
+            .setURI(path)
+            .setMethod(HttpMethod.POST);
+    return await(
+        client
+            .request(options)
+            .compose(
+                request -> {
+                  request.putHeader("Authorization", "Bearer " + bearer);
+                  request.putHeader("Content-Type", "application/json");
+                  return request.send(body.encode());
+                })
+            .compose(
+                response ->
+                    response
+                        .body()
+                        .map(
+                            answer ->
+                                new Answer(
+                                    response.statusCode(),
+                                    new JsonObject(answer),
+                                    response.getHeader("Retry-After")))));
+  }
+
+  /**
+   * Wire an agent surface that can be asked but never launches: every case below is answered
+   * before the harness is reached, which is the point — nothing may spawn on the refused paths.
+   */
+  private void wireAgentsThatNeverLaunch() {
+    DaemonAgentDefaults defaults = new DaemonAgentDefaults(Optional.of("CLAUDE"), false);
+    api.wireAgents(
+        new AgentLaunchService(null, null, null, null, defaults, null, PROJECT, null, 0),
+        null,
+        defaults);
+  }
+
+  private static JsonObject launch(String surface) {
+    return new JsonObject().put("scope", "REPOSITORY").put("surface", surface);
   }
 
   private static <T> T await(Future<T> future) {
@@ -165,6 +218,80 @@ class ProjectsApiTest {
     Answer answer = get(BASE + "/agents/available", TOKEN);
 
     assertEquals(503, answer.status());
+  }
+
+  /**
+   * Per-session mode without a desk-agents credential: a 503 naming the key, and no launch — even
+   * with a front-desk credential present, which is the desk's own and never a person's.
+   */
+  @Test
+  void aLaunchWithoutItsCredentialFailsClosed() {
+    wireAgentsThatNeverLaunch();
+    SessionCredentialStore credentials =
+        new SessionCredentialStore(() -> "qits_tok_container", () -> "tok-agent-container");
+    credentials.replace(
+        new SessionCredentials(
+            List.of(
+                new SessionCredentials.Credential("entity-9", "qits_tok_refine", "tok-r"),
+                new SessionCredentials.Credential("front-desk", "qits_tok_delivery", "tok-dd"))));
+    api.wireSessions(credentials);
+
+    Answer answer = post(BASE + "/agents", TOKEN, launch("project.work"));
+
+    assertEquals(503, answer.status());
+    String message = answer.body().getString("message");
+    assertTrue(message.contains("'desk-agents'"), message);
+    assertFalse(message.contains("qits_tok"), "never a token");
+  }
+
+  /** Inside the grace window a launch is "not yet": 503 with a Retry-After, and nothing spawned. */
+  @Test
+  void aLaunchInsideTheGraceWindowIsToldToRetry() {
+    wireAgentsThatNeverLaunch();
+    SessionCredentialStore credentials =
+        new SessionCredentialStore(() -> "qits_tok_container", () -> "tok-agent-container");
+    credentials.openWindow(java.time.Duration.ofMinutes(5));
+    api.wireSessions(credentials);
+
+    Answer answer = post(BASE + "/agents", TOKEN, launch("project.work"));
+
+    assertEquals(503, answer.status());
+    assertEquals(ProjectsApi.WAITING_FOR_SESSION_CREDENTIALS, answer.body().getString("message"));
+    assertEquals(
+        String.valueOf(ProjectsApi.SESSION_CREDENTIALS_RETRY_AFTER_SECONDS), answer.retryAfter());
+  }
+
+  /**
+   * A person's launch runs on the desk-agents credential whatever surface it names — never the
+   * front desk's, which may carry the delivery rights; before qits sent any, on the container's own
+   * token, explicitly — it is no longer inherited — and never on the delivery token.
+   */
+  @Test
+  void aPersonsLaunchRunsOnTheDeskAgentsCredential() {
+    SessionCredentialStore credentials =
+        new SessionCredentialStore(() -> "qits_tok_container", () -> "tok-agent-container");
+    api.wireSessions(credentials);
+
+    Map<String, String> legacy =
+        api.personLaunch(AgentJson.launchRequest(launch("project.work"))).environment();
+    assertEquals("qits_tok_container", legacy.get("QITS_TOKEN"));
+    assertEquals("tok-agent-container", legacy.get("QITS_TOKEN_SUBJECT"));
+    assertEquals("", legacy.get("QITS_PROJECTS_DAEMON_API_TOKEN"), "the API token is removed");
+    assertEquals("", legacy.get("QITS_DELIVERY_TOKEN"));
+
+    credentials.replace(
+        new SessionCredentials(
+            List.of(
+                new SessionCredentials.Credential("front-desk", "qits_tok_delivery", "tok-dd"),
+                new SessionCredentials.Credential("desk-agents", "qits_tok_desk", "tok-desk"))));
+    for (String surface : List.of("project.work", "project.delivery")) {
+      Map<String, String> overlay =
+          api.personLaunch(AgentJson.launchRequest(launch(surface))).environment();
+      assertEquals("qits_tok_desk", overlay.get("QITS_TOKEN"), surface);
+      assertEquals("tok-desk", overlay.get("QITS_TOKEN_SUBJECT"), surface);
+      assertEquals("", overlay.get("QITS_PROJECTS_DAEMON_API_TOKEN"), surface);
+      assertEquals("", overlay.get("QITS_DELIVERY_TOKEN"), surface);
+    }
   }
 
   @Test
