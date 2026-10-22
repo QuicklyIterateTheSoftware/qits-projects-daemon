@@ -178,9 +178,12 @@ class DeliveryKeeperTest {
       return command != null && command.isRunning();
     }
 
+    /** When set, the states come from a real webhook's store instead of {@link #states}. */
+    HookWebhook hooks;
+
     @Override
     public Optional<String> activityState(String commandId) {
-      return Optional.ofNullable(states.get(commandId));
+      return hooks != null ? hooks.lastState(commandId) : Optional.ofNullable(states.get(commandId));
     }
 
     @Override
@@ -418,6 +421,32 @@ class DeliveryKeeperTest {
     advance(INTERVAL.toMillis());
     advance(INTERVAL.toMillis());
     assertEquals(2, tick.consecutiveSkips(), "counting again from zero, not from the old run");
+  }
+
+  @Test
+  void anIdlePromptAfterAPassDoesNotStopTheNextTick() {
+    // Measured live (qits-1440): Claude Code posts an idle_prompt Notification about a minute after
+    // every finished turn. It must leave the desk IDLE, or every tick after the first is skipped.
+    desk.hooks = new HookWebhook(null, 13337, message -> {});
+    start(Lifecycle.ALWAYS_ON, "on", TOKEN);
+    advance(0);
+    String live = kept();
+    desk.hooks.handle("SessionStart", new io.vertx.core.json.JsonObject(), live);
+
+    advance(INTERVAL.toMillis());
+    assertEquals(1, desk.typed.size());
+    desk.hooks.handle("UserPromptSubmit", new io.vertx.core.json.JsonObject(), live);
+    desk.hooks.handle("Stop", new io.vertx.core.json.JsonObject(), live);
+    desk.hooks.handle(
+        "Notification",
+        new io.vertx.core.json.JsonObject()
+            .put("hook_event_name", "Notification")
+            .put("notification_type", "idle_prompt")
+            .put("message", "Claude is waiting for your input"),
+        live);
+
+    advance(INTERVAL.toMillis());
+    assertEquals(2, desk.typed.size(), "the next tick is sent");
   }
 
   @Test

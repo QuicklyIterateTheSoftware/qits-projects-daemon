@@ -112,6 +112,89 @@ class HookWebhookTest {
     assertEquals(AgentState.WAITING, lastSent().state());
   }
 
+  // --- which Notification is a prompt (qits-1440) ------------------------------------------------
+
+  /** Claude Code's after-a-turn reminder, as it posts it. */
+  private JsonObject idlePrompt() {
+    return payload("Notification")
+        .put("notification_type", "idle_prompt")
+        .put("message", "Claude is waiting for your input");
+  }
+
+  private JsonObject permissionPrompt() {
+    return payload("Notification")
+        .put("notification_type", "permission_prompt")
+        .put("message", "Claude needs your permission to use Bash");
+  }
+
+  @Test
+  void anIdlePromptNotificationIsIdle() {
+    webhook.handle("Notification", idlePrompt(), "cmd-1");
+    assertEquals(AgentState.IDLE, lastSent().state());
+    assertEquals("Notification", lastSent().hookEvent());
+    assertEquals(java.util.Optional.of(AgentState.IDLE), webhook.lastState("cmd-1"));
+  }
+
+  @Test
+  void anIdlePromptAfterStopLeavesTheSessionIdle() {
+    webhook.handle("UserPromptSubmit", payload("UserPromptSubmit"), "cmd-1");
+    webhook.handle("Stop", payload("Stop"), "cmd-1");
+    webhook.handle("Notification", idlePrompt(), "cmd-1");
+    assertEquals(java.util.Optional.of(AgentState.IDLE), webhook.lastState("cmd-1"));
+  }
+
+  @Test
+  void anOlderClaudesIdlePromptIsKnownByItsMessage() {
+    webhook.handle(
+        "Notification",
+        payload("Notification").put("message", "Claude is waiting for your input"),
+        "cmd-1");
+    assertEquals(java.util.Optional.of(AgentState.IDLE), webhook.lastState("cmd-1"));
+  }
+
+  @Test
+  void aPermissionPromptIsWaiting() {
+    webhook.handle("Notification", permissionPrompt(), "cmd-1");
+    assertEquals(java.util.Optional.of(AgentState.WAITING), webhook.lastState("cmd-1"));
+    // An older Claude's untyped permission prompt is no idle prompt either.
+    webhook.handle(
+        "Notification",
+        payload("Notification").put("message", "Claude needs your permission to use Bash"),
+        "cmd-2");
+    assertEquals(java.util.Optional.of(AgentState.WAITING), webhook.lastState("cmd-2"));
+  }
+
+  @Test
+  void stopAfterAPermissionPromptStaysWaiting() {
+    webhook.handle("Notification", permissionPrompt(), "cmd-1");
+    webhook.handle("Stop", payload("Stop"), "cmd-1");
+    assertEquals(java.util.Optional.of(AgentState.WAITING), webhook.lastState("cmd-1"));
+  }
+
+  @Test
+  void anIdlePromptNeverClearsAPendingPermissionPrompt() {
+    notifying.handle("Notification", permissionPrompt(), "cmd-1");
+    int before = sent.size();
+    activity.clear();
+    notifying.handle("Notification", idlePrompt(), "cmd-1");
+    assertEquals(before, sent.size(), "no frame goes out");
+    assertEquals(java.util.Optional.of(AgentState.WAITING), notifying.lastState("cmd-1"));
+    assertEquals(AgentState.WAITING, activity.get("cmd-1"), "the launch service hears WAITING");
+  }
+
+  @Test
+  void anUnknownNotificationIsWaiting() {
+    webhook.handle(
+        "Notification",
+        payload("Notification")
+            .put("notification_type", "something_new")
+            .put("message", "Claude is waiting for your input"),
+        "cmd-1");
+    assertEquals(java.util.Optional.of(AgentState.WAITING), webhook.lastState("cmd-1"));
+    webhook.handle("Notification", payload("Notification"), "cmd-2");
+    assertEquals(java.util.Optional.of(AgentState.WAITING), webhook.lastState("cmd-2"));
+  }
+
   @Test
   void reportCurrentReplaysLastStatePerCommand() {
     webhook.handle("UserPromptSubmit", payload("UserPromptSubmit"), "cmd-1");

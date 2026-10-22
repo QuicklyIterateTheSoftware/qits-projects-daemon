@@ -9,6 +9,7 @@ import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.json.JsonObject;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -35,12 +36,33 @@ import org.jboss.logging.Logger;
  * also fires when Claude pauses to ask the user — so a {@code Stop} arriving while the stored state
  * is {@code WAITING} (a preceding {@code Notification}) is dropped, keeping the permission-prompt
  * signal.
+ *
+ * <p>Not every {@code Notification} is a prompt, though (qits-1440). Claude Code also sends one
+ * about a minute after a turn ends while the session sits untouched — {@code notification_type}
+ * {@code idle_prompt}, {@code message} "Claude is waiting for your input" — and reading that as
+ * {@code WAITING} parked every finished session there until its next prompt, which is exactly the
+ * state {@link DeliveryKeeper}'s tick refuses to type into: the front desk got one delivery pass
+ * and then none. So an idle prompt maps to {@code IDLE} (see {@link #isIdlePrompt}); a {@code
+ * permission_prompt}, and any notification this daemon does not recognise, stays {@code WAITING} —
+ * an unknown one might still be a prompt somebody has to answer. An idle prompt never downgrades a
+ * stored {@code WAITING}, by the same rule as {@code Stop}: since idle prompts no longer store
+ * {@code WAITING}, every stored {@code WAITING} came from a notification that was not one, so the
+ * stored state alone is enough to tell a pending prompt apart and no cause needs remembering.
  */
 final class HookWebhook {
 
   private static final Logger LOG = Logger.getLogger(HookWebhook.class);
 
   static final String PATH = "/hooks/claude-code";
+
+  /** The {@code notification_type} Claude Code gives the after-a-turn idle reminder. */
+  static final String IDLE_PROMPT = "idle_prompt";
+
+  /**
+   * The text of that reminder's {@code message}, matched when an older Claude Code sends no {@code
+   * notification_type} at all.
+   */
+  static final String IDLE_PROMPT_MESSAGE = "waiting for your input";
 
   private final Vertx vertx;
   private final int port;
@@ -113,16 +135,20 @@ final class HookWebhook {
    * dropped.
    */
   void handle(String hookEvent, JsonObject body, String commandId) {
-    String state = mapState(hookEvent);
+    boolean idlePrompt = "Notification".equals(hookEvent) && isIdlePrompt(body);
+    String state = idlePrompt ? AgentState.IDLE : mapState(hookEvent);
     if (state == null || commandId == null || commandId.isBlank()) {
       return;
     }
-    // A turn-finished Stop must not downgrade a pending permission prompt (WAITING wins).
+    // A turn-finished Stop, or an idle-prompt Notification, must not downgrade a pending
+    // permission prompt (WAITING wins).
     AgentActivity current = lastByCommand.get(commandId);
-    if ("Stop".equals(hookEvent) && current != null && AgentState.WAITING.equals(current.state())) {
+    if (("Stop".equals(hookEvent) || idlePrompt)
+        && current != null
+        && AgentState.WAITING.equals(current.state())) {
       // Nothing changes in lastByCommand and no frame goes out, but the launch service still hears
       // the stored state — WAITING, never the raw Stop's IDLE — so a queued rename keeps waiting on
-      // the permission prompt rather than firing into it.
+      // the permission prompt rather than firing into it. The same holds for an idle prompt.
       notifyAgentLaunch(commandId, current.state());
       return;
     }
@@ -182,6 +208,25 @@ final class HookWebhook {
     if (s != null) {
       s.close();
     }
+  }
+
+  /**
+   * Whether a {@code Notification} body is Claude Code's idle reminder rather than a prompt: its
+   * {@code notification_type} is {@code idle_prompt}, or — only when the type is absent, as from an
+   * older Claude Code — its {@code message} says it is waiting for input. A present type that is
+   * anything else ({@code permission_prompt}, {@code elicitation_dialog}, one never seen) is not.
+   */
+  static boolean isIdlePrompt(JsonObject body) {
+    if (body == null) {
+      return false;
+    }
+    Object type = body.getValue("notification_type");
+    if (type != null) {
+      return IDLE_PROMPT.equals(type);
+    }
+    Object message = body.getValue("message");
+    return message instanceof String text
+        && text.toLowerCase(Locale.ROOT).contains(IDLE_PROMPT_MESSAGE);
   }
 
   private static String mapState(String hookEvent) {
