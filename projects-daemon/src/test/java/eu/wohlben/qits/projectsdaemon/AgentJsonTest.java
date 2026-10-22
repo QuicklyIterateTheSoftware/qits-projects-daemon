@@ -112,9 +112,10 @@ class AgentJsonTest {
   }
 
   /**
-   * A browser-started session never holds the delivery desk's credential (qits-1495): both names
-   * map to empty, which the library renders as a removal. The project.delivery surface is no
-   * exception — only {@link DeliveryKeeper} hands that session its token.
+   * A browser-started session never holds the delivery token (qits-1495, qits-1440): both names map
+   * to empty, which the library renders as a removal, and no {@code QITS_TOKEN} is set. A person's
+   * project.work session is no exception — only the keeper's own front desk holds the token, through
+   * {@link FrontDeskCredential} — and neither is project.delivery, which nothing launches any more.
    */
   @Test
   void aLaunchFromTheBrowserCarriesTheScrubOverlay() {

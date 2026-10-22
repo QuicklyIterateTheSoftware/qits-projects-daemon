@@ -27,8 +27,8 @@ import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 /**
- * {@link DeliveryCredentials}: the delivery desk's credential reaches no child but the delivery
- * session, whichever way the child is spawned (qits-1495).
+ * {@link DeliveryCredentials}: the delivery token reaches no child but the keeper's front desk
+ * session, whichever way the child is spawned (qits-1495, qits-1440).
  */
 class DeliveryCredentialsTest {
 

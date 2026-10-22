@@ -32,7 +32,7 @@ public final class CommandExecutor {
   public static void run(RunCommand command, Consumer<DaemonMessage> emit) {
     String correlationId = command.correlationId();
     ProcessBuilder builder = new ProcessBuilder(command.argv());
-    // The delivery desk's credential is for the delivery session alone (DeliveryCredentials).
+    // The delivery token is for the keeper's front desk session alone (DeliveryCredentials).
     DeliveryCredentials.scrub(builder.environment());
     if (command.cwd() != null && !command.cwd().isBlank()) {
       builder.directory(new File(command.cwd()));

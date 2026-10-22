@@ -15,24 +15,26 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * Keeps the delivery desk's credential ({@code QITS_DELIVERY_TOKEN}, {@code
- * QITS_DELIVERY_TOKEN_SUBJECT}) out of every child this daemon spawns, the delivery session
- * excepted (qits-1495).
+ * Keeps the desk's delivery token ({@code QITS_DELIVERY_TOKEN}, {@code
+ * QITS_DELIVERY_TOKEN_SUBJECT}) out of every child this daemon spawns, the front desk session the
+ * keeper launches excepted (qits-1495, qits-1440).
  *
  * <p>The container is created with both names in its environment, and every child inherits the
  * daemon's environment by default — so without this, any agent a person starts, any {@code
  * RunCommand}, the checkout follower and the git reads would all hold a token whose roles ({@code
- * qits:desk}) none of them was meant to carry. The delivery session does not need the names either:
- * {@link DeliveryKeeper} hands it the token as its {@code QITS_TOKEN}, which is the spelling the CLI
- * and the platform MCP server read.
+ * qits:desk}) none of them was meant to carry. The keeper's front desk does not need the names
+ * either: {@link FrontDeskCredential} hands it the token as its {@code QITS_TOKEN}, which is the
+ * spelling the CLI and the platform MCP server read, and removes these two as everybody else's
+ * launch does.
  *
  * <p>Three shapes of spawn, three answers:
  *
  * <ul>
  *   <li><b>agent launches</b> carry {@link #SCRUB} as their environment overlay ({@link
  *       #scrubbed}): the library removes an overlay key mapped to {@code ""} and opens the script
- *       with an {@code unset} of it. That covers {@link FrontDeskKeeper}'s desk and every launch
- *       through {@code POST /agents}.
+ *       with an {@code unset} of it. That covers every launch through {@code POST /agents} — a
+ *       person's {@code project.work} session included — and {@link FrontDeskKeeper}'s desk, which
+ *       carries it beside the delivery token while delivering ({@link FrontDeskCredential}).
  *   <li><b>the daemon's own {@link ProcessBuilder}s</b> — {@link CommandExecutor} ({@code
  *       RunCommand}), {@link CheckoutFollower}, {@link Provisioner}, {@link ProjectDescriber} —
  *       remove both names from the inherited environment ({@link #scrub(Map)}).
@@ -61,7 +63,7 @@ final class DeliveryCredentials {
 
   /**
    * {@code request} with {@link #SCRUB} laid over whatever overlay it already carries. The scrub
-   * wins: no caller other than the delivery keeper may hand a child the delivery credential.
+   * wins: nothing but {@link FrontDeskCredential} may hand a child the delivery token.
    */
   static AgentLaunchRequest scrubbed(AgentLaunchRequest request) {
     Map<String, String> overlay = new HashMap<>(request.environment());

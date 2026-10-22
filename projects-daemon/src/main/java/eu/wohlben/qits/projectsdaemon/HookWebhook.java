@@ -163,7 +163,7 @@ final class HookWebhook {
 
   /**
    * The last state stored for {@code commandId} — what {@link DeliveryKeeper}'s tick reads to tell
-   * an idle delivery desk from a busy one. Empty when nothing was heard yet or the session ended.
+   * an idle front desk from a busy one. Empty when nothing was heard yet or the session ended.
    */
   Optional<String> lastState(String commandId) {
     AgentActivity activity = commandId == null ? null : lastByCommand.get(commandId);
