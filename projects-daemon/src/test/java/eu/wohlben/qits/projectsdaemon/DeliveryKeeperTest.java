@@ -373,6 +373,54 @@ class DeliveryKeeperTest {
   }
 
   @Test
+  void theFirstTwoConsecutiveSkipsDoNotEscalate() {
+    start(Lifecycle.ALWAYS_ON, "on", TOKEN);
+    advance(0);
+    String live = kept();
+
+    desk.states.put(live, "BUSY");
+    advance(INTERVAL.toMillis());
+    assertEquals(1, tick.consecutiveSkips());
+
+    advance(INTERVAL.toMillis());
+    assertEquals(2, tick.consecutiveSkips(), "two in a row: still not escalated");
+  }
+
+  @Test
+  void theThirdConsecutiveSkipEscalates() {
+    start(Lifecycle.ALWAYS_ON, "on", TOKEN);
+    advance(0);
+    String live = kept();
+
+    desk.states.put(live, "BUSY");
+    advance(INTERVAL.toMillis());
+    advance(INTERVAL.toMillis());
+    advance(INTERVAL.toMillis());
+    assertEquals(3, tick.consecutiveSkips(), "the third skip in a row");
+  }
+
+  @Test
+  void aWriteResetsTheConsecutiveSkipCount() {
+    start(Lifecycle.ALWAYS_ON, "on", TOKEN);
+    advance(0);
+    String live = kept();
+
+    desk.states.put(live, "BUSY");
+    advance(INTERVAL.toMillis());
+    advance(INTERVAL.toMillis());
+    assertEquals(2, tick.consecutiveSkips());
+
+    desk.states.put(live, "IDLE");
+    advance(INTERVAL.toMillis());
+    assertEquals(0, tick.consecutiveSkips(), "a written tick resets the count");
+
+    desk.states.put(live, "BUSY");
+    advance(INTERVAL.toMillis());
+    advance(INTERVAL.toMillis());
+    assertEquals(2, tick.consecutiveSkips(), "counting again from zero, not from the old run");
+  }
+
+  @Test
   void theTickIsSkippedWhileAPersonHasADraft() {
     start(Lifecycle.ALWAYS_ON, "on", TOKEN);
     advance(0);
