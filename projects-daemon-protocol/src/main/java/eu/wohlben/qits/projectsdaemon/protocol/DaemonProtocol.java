@@ -24,8 +24,12 @@ public final class DaemonProtocol {
    * <p>1 already binds the HTTP API to {@code 127.0.0.1} and serves {@link OpenStream}. The
    * workspace daemon reached that arrangement at its version 4, after three versions of a listener
    * on the shared network; there is no reason to reproduce the versions it took to get there.
+   *
+   * <p>2 understands {@link SessionCredentials} (qits-1482): the backend sends that frame only to a
+   * daemon announcing 2 or later, and a daemon that never receives one keeps launching on its own
+   * token, exactly as 1 did.
    */
-  public static final int CAPABILITY_VERSION = 1;
+  public static final int CAPABILITY_VERSION = 2;
 
   /**
    * The fixed {@code correlationId} the daemon tags its autonomous self-provision output ({@link
@@ -70,6 +74,7 @@ public final class DaemonProtocol {
     public static final String RUN_COMMAND = "runCommand";
     public static final String DESCRIBE = "describe";
     public static final String OPEN_STREAM = "openStream";
+    public static final String SESSION_CREDENTIALS = "sessionCredentials";
 
     private Type() {}
   }
@@ -103,6 +108,10 @@ public final class DaemonProtocol {
     public static final String TOPIC = "topic";
     public static final String NONCE = "nonce";
     public static final String PATH = "path";
+    public static final String CREDENTIALS = "credentials";
+    public static final String KEY = "key";
+    public static final String TOKEN = "token";
+    public static final String SUBJECT = "subject";
 
     private Field() {}
   }

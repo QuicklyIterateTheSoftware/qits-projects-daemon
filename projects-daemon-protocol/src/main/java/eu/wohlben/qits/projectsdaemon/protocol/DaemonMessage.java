@@ -19,4 +19,5 @@ public sealed interface DaemonMessage
         Ack,
         RunCommand,
         Describe,
-        OpenStream {}
+        OpenStream,
+        SessionCredentials {}

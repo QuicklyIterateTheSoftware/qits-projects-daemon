@@ -103,6 +103,18 @@ public final class DaemonCodec {
         map.put(Field.NONCE, m.nonce());
         map.put(Field.PATH, m.path());
       }
+      case SessionCredentials m -> {
+        map.put(Field.TYPE, Type.SESSION_CREDENTIALS);
+        List<Map<String, Object>> credentials = new ArrayList<>(m.credentials().size());
+        for (SessionCredentials.Credential credential : m.credentials()) {
+          Map<String, Object> entry = new LinkedHashMap<>();
+          entry.put(Field.KEY, credential.key());
+          entry.put(Field.TOKEN, credential.token());
+          entry.put(Field.SUBJECT, credential.subject());
+          credentials.add(entry);
+        }
+        map.put(Field.CREDENTIALS, credentials);
+      }
     }
     return map;
   }
@@ -159,6 +171,7 @@ public final class DaemonCodec {
               strMap(map, Field.ENV));
       case Type.DESCRIBE -> new Describe(str(map, Field.CORRELATION_ID));
       case Type.OPEN_STREAM -> new OpenStream(str(map, Field.NONCE), str(map, Field.PATH));
+      case Type.SESSION_CREDENTIALS -> new SessionCredentials(credentials(map, Field.CREDENTIALS));
       default -> throw new IllegalArgumentException("unknown projects-daemon message type: " + type);
     };
   }
@@ -191,6 +204,37 @@ public final class DaemonCodec {
     List<String> out = new ArrayList<>(list.size());
     for (Object element : list) {
       out.add(element == null ? null : element.toString());
+    }
+    return out;
+  }
+
+  /**
+   * The {@link SessionCredentials} list: an absent or non-list field is empty, and an entry that is
+   * not an object or names no key is skipped rather than failing the whole frame — the rest of the
+   * desk's sessions still get theirs.
+   */
+  private static List<SessionCredentials.Credential> credentials(
+      Map<String, Object> map, String key) {
+    Object value = map.get(key);
+    if (!(value instanceof List<?> list)) {
+      return List.of();
+    }
+    List<SessionCredentials.Credential> out = new ArrayList<>(list.size());
+    for (Object element : list) {
+      if (!(element instanceof Map<?, ?> raw)) {
+        continue;
+      }
+      Object credentialKey = raw.get(Field.KEY);
+      if (credentialKey == null) {
+        continue;
+      }
+      Object token = raw.get(Field.TOKEN);
+      Object subject = raw.get(Field.SUBJECT);
+      out.add(
+          new SessionCredentials.Credential(
+              credentialKey.toString(),
+              token == null ? null : token.toString(),
+              subject == null ? null : subject.toString()));
     }
     return out;
   }

@@ -173,6 +173,66 @@ class DaemonCodecTest {
   }
 
   @Test
+  void sessionCredentialsRoundTrip() {
+    SessionCredentials frame =
+        new SessionCredentials(
+            List.of(
+                new SessionCredentials.Credential(
+                    SessionCredentials.FRONT_DESK_KEY, "qits_tok_desk", "tok-desk-session-proj-1"),
+                new SessionCredentials.Credential(
+                    "0b7c4e1a-entity", "qits_tok_refine", "tok-refinement-row-9")));
+    assertEquals(frame, roundTrip(frame));
+    Map<String, Object> wire = DaemonCodec.encode(frame);
+    assertEquals(DaemonProtocol.Type.SESSION_CREDENTIALS, wire.get(DaemonProtocol.Field.TYPE));
+    assertEquals(
+        List.of(
+            Map.of("key", "front-desk", "token", "qits_tok_desk", "subject", "tok-desk-session-proj-1"),
+            Map.of("key", "0b7c4e1a-entity", "token", "qits_tok_refine", "subject", "tok-refinement-row-9")),
+        wire.get(DaemonProtocol.Field.CREDENTIALS));
+  }
+
+  @Test
+  void anEmptySessionCredentialsListRoundTripsAsEmpty() {
+    // Replace semantics: an empty frame is the server saying "no session has a credential now".
+    SessionCredentials empty = new SessionCredentials(List.of());
+    assertEquals(empty, roundTrip(empty));
+    assertEquals(
+        new SessionCredentials(List.of()),
+        DaemonCodec.decode(Map.of(DaemonProtocol.Field.TYPE, "sessionCredentials")));
+  }
+
+  @Test
+  void sessionCredentialsSkipEntriesWithoutAKey() {
+    Map<String, Object> wire = new LinkedHashMap<>();
+    wire.put(DaemonProtocol.Field.TYPE, DaemonProtocol.Type.SESSION_CREDENTIALS);
+    Map<String, Object> keyless = new LinkedHashMap<>();
+    keyless.put("token", "t");
+    wire.put(
+        DaemonProtocol.Field.CREDENTIALS,
+        List.of(keyless, "not an object", Map.of("key", "front-desk", "token", "t2")));
+    assertEquals(
+        new SessionCredentials(List.of(new SessionCredentials.Credential("front-desk", "t2", ""))),
+        DaemonCodec.decode(wire));
+  }
+
+  @Test
+  void aCredentialNeverPrintsItsToken() {
+    SessionCredentials frame =
+        new SessionCredentials(
+            List.of(new SessionCredentials.Credential("front-desk", "qits_tok_secret", "subj")));
+    org.junit.jupiter.api.Assertions.assertFalse(frame.toString().contains("qits_tok_secret"));
+    org.junit.jupiter.api.Assertions.assertTrue(frame.toString().contains("subj"));
+  }
+
+  @Test
+  void capabilityTwoIsTheOneThatUnderstandsSessionCredentials() {
+    assertEquals(2, DaemonProtocol.CAPABILITY_VERSION);
+    assertEquals("sessionCredentials", DaemonProtocol.Type.SESSION_CREDENTIALS);
+    assertEquals("front-desk", SessionCredentials.FRONT_DESK_KEY);
+    assertEquals("desk-agents", SessionCredentials.DESK_AGENTS_KEY);
+  }
+
+  @Test
   void theCrossRepoPathsAreTheOnesBothSidesAgreedOn() {
     // Append-only: qits-projects serves these prefixes and the daemon is handed urls built from
     // them. Changing either breaks every already-running container, which is why they are asserted
