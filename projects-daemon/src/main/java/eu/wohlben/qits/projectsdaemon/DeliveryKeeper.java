@@ -44,9 +44,12 @@ import org.jboss.logging.Logger;
  * never to a {@code project.work} session a person started from the desk panel — that one is
  * scrubbed and holds no delivery rights. It is typed when that command is RUNNING and its last
  * reported activity is {@code IDLE}. Busy, waiting on a permission prompt, not yet heard from, not
- * running, or holding a person's unsent draft: the tick is skipped (DEBUG) and nothing is remembered
- * — the next one comes a full interval later. Ticks never queue: each schedules the next only once
- * it is done, on this class's one worker thread.
+ * running, or holding a person's unsent draft: the tick is skipped. The first two consecutive skips
+ * log at DEBUG; the third, and every one after it, logs at INFO, naming the reason plus how many
+ * ticks in a row were skipped and since when. Only that count — and when the run of skips started —
+ * is remembered, and only for the log; a tick that writes resets it to zero. The next skipped (or
+ * written) tick comes a full interval later either way. Ticks never queue: each schedules the next
+ * only once it is done, on this class's one worker thread.
  */
 final class DeliveryKeeper {
 
@@ -253,6 +256,10 @@ final class DeliveryKeeper {
   private volatile boolean started;
   private volatile boolean stopped;
 
+  // Touched only on this keeper's one worker thread (the scheduler that runs tick()/nudge()).
+  private int consecutiveSkips;
+  private Instant skippedSince;
+
   /**
    * @param frontDesk the command the front desk keeper launched and keeps ({@link
    *     FrontDeskKeeper#keptCommandId()}) — the only session a tick is typed into
@@ -306,21 +313,46 @@ final class DeliveryKeeper {
   private void nudge() {
     Optional<String> kept = frontDesk.get();
     if (kept.isEmpty() || !session.running(kept.get())) {
-      LOG.debug("Delivery tick skipped: the front desk the keeper launched is not running.");
+      skip("the front desk the keeper launched is not running");
       return;
     }
     String commandId = kept.get();
     Optional<String> state = session.activityState(commandId);
     if (!state.map(AgentState.IDLE::equalsIgnoreCase).orElse(false)) {
-      LOG.debugf(
-          "Delivery tick skipped: the front desk is %s.",
-          state.map(value -> value.toLowerCase(Locale.ROOT)).orElse("not reported yet"));
+      skip(
+          "the front desk is "
+              + state.map(value -> value.toLowerCase(Locale.ROOT)).orElse("not reported yet"));
       return;
     }
     GuardedInput written =
         session.send(commandId, tickTurn(Instant.ofEpochMilli(clock.getAsLong())));
     if (written != GuardedInput.WRITTEN) {
-      LOG.debugf("Delivery tick skipped: %s.", written);
+      skip(String.valueOf(written));
+      return;
     }
+    consecutiveSkips = 0;
+  }
+
+  /**
+   * Record one skipped tick and log it: DEBUG for the first two in a row, INFO from the third on —
+   * named with {@code reason}, the running count and when the run started.
+   */
+  private void skip(String reason) {
+    consecutiveSkips++;
+    if (consecutiveSkips == 1) {
+      skippedSince = Instant.ofEpochMilli(clock.getAsLong());
+    }
+    if (consecutiveSkips <= 2) {
+      LOG.debugf("Delivery tick skipped: %s.", reason);
+    } else {
+      LOG.infof(
+          "Delivery tick skipped (%d in a row since %s): %s.",
+          consecutiveSkips, skippedSince, reason);
+    }
+  }
+
+  /** How many ticks in a row have just been skipped; a written tick resets it. For a test. */
+  int consecutiveSkips() {
+    return consecutiveSkips;
   }
 }
