@@ -57,7 +57,7 @@
              and the provider recordings the daemon's pact rows are written against. Exact
              versions: a new recording is a contract change, adopted on purpose. -->
         <qits-pact-consumer.version>2026.1019.82625</qits-pact-consumer.version>
-        <qits-idp-golden-masters.version>2026.1021.194347</qits-idp-golden-masters.version>
+        <qits-idp-golden-masters.version>2026.1022.183304</qits-idp-golden-masters.version>
 
         <!-- THE CONSUMER PACTS ConsumerPactVerificationTest verifies (ticket qits-1149): one jar per
              consumer that commits `pacts/<consumer>_qits-projects-daemon.json`, test scope. Exact
