@@ -50,6 +50,8 @@ library declares:
                             QITS_TOKEN while delivering, the container's own token otherwise
     DeliveryKeeper          the delivery tick: one "Run one pass of the delivery loop" turn per interval,
                             typed into the keeper's own front desk when idle; writes the loop's brief
+    FrontDeskInbox          turns qits types into the keeper's own front desk (POST /front-desk/prompt),
+                            queued while it is busy, and its last answer (GET /front-desk/last-answer)
     DaemonSecrets           keeping the daemon's secrets — QITS_DELIVERY_TOKEN(_SUBJECT), the API token,
                             its own QITS_TOKEN(_SUBJECT) — out of every child that is not meant to hold them
     SessionCredentialStore  the per-session tokens qits sends over the control socket, by session key, and
@@ -60,6 +62,27 @@ configuration. `ControlSocket` is the single reader and hands every setting down
 argument. That is not tidiness: two readers of the hook port is how `HookWebhook` and
 `AgentLaunchService` end up bound to different ports, which fails invisibly (the agent runs and
 simply never reports lineage).
+
+## The front desk's inbox (qits-1572)
+
+qits-projects reaches the front desk through two loopback API routes (same bearer as every other
+route); their JSON is a contract qits-projects passes through verbatim, so keep the field names:
+
+    POST /front-desk/prompt {"text"}  200 {commandId, state, delivered, queued, position}
+                                      400 blank/missing text · 409 no kept desk running · 429 queue full
+    GET  /front-desk/last-answer      200 {commandId, sessionId, state, text, at} (text/at null: none yet)
+                                      404 no kept desk
+
+Refusals carry `{"reason"}` (plus this server's usual `message`). `FrontDeskInbox` targets only
+`FrontDeskKeeper.keptCommandId()`. A prompt is typed at once when that command is RUNNING, its hook
+state is exactly `IDLE`, nothing is queued, no inbox-typed turn is still waiting for its
+`UserPromptSubmit` (30 s grace) and no draft holds it; otherwise it joins a FIFO of 16. Every `IDLE`
+activity of the kept command (`HookWebhook.setActivityListener`) flushes exactly one queued turn; a
+draft keeps it at the head. The inbox and `DeliveryKeeper` share one lock, so their keystrokes never
+interleave, and the tick is skipped with reason `inbox` while turns are pending. The last answer is
+the `text` blocks of the main-chain assistant entries after the last real user prompt on the
+TRANSCRIPT channel — `tool_result` user entries, meta and sidechain entries are not prompts, and
+`tool_use`/`thinking` blocks are never part of it.
 
 ## The clone-alone rule
 
