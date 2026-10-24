@@ -27,6 +27,46 @@
       ]
     },
     {
+      "name": "a daemon whose front desk is running",
+      "slug": "a-daemon-whose-front-desk-is-running",
+      "params": {
+        "apiToken": "daemon-api-token",
+        "projectId": "00000000-0000-4000-8000-000000000001"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "getFrontDeskLastAnswer",
+          "method": "GET",
+          "path": "/projects/container/{projectId}/front-desk/last-answer",
+          "status": 200,
+          "file": "a-daemon-whose-front-desk-is-running/getFrontDeskLastAnswer.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "promptFrontDesk",
+          "method": "POST",
+          "path": "/projects/container/{projectId}/front-desk/prompt",
+          "body": {
+            "text": "What is ready for dev?"
+          },
+          "status": 200,
+          "file": "a-daemon-whose-front-desk-is-running/promptFrontDesk.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    },
+    {
       "name": "a daemon whose harnesses were probed",
       "slug": "a-daemon-whose-harnesses-were-probed",
       "params": {

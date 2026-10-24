@@ -32,8 +32,8 @@ import org.junit.jupiter.api.io.TempDir;
  * ProviderStates}), asks the daemon's API and renders {@code
  * golden-masters/<state-slug>/<operationId>.json}; then it renders {@code
  * golden-masters/index.json} in the format qits-projects-service set (format version 1). The path is
- * the route template, a query would be recorded apart as {@code query}, and an operation that takes
- * no body records none.
+ * the route template, a query would be recorded apart as {@code query}, a request body is recorded
+ * as {@code body}, and an operation that takes no body records none.
  *
  * <p><b>Nothing is frozen.</b> The state fixes every value, so the body is recorded as it is and the
  * index's {@code frozen} lists are empty.
@@ -50,8 +50,17 @@ class GoldenMasterRecordingTest {
   /** The application name, as the index and the golden-master packages name it. */
   static final String PROVIDER = "qits-projects-daemon";
 
-  /** One recorded interaction. {@code path} is the route template; its {@code {params}} come from the state. */
-  record Interaction(String state, String operationId, String method, String path, int status) {}
+  /**
+   * One recorded interaction. {@code path} is the route template; its {@code {params}} come from
+   * the state. {@code body} is the JSON request body, null for an operation that takes none.
+   */
+  record Interaction(
+      String state, String operationId, String method, String path, String body, int status) {
+
+    Interaction(String state, String operationId, String method, String path, int status) {
+      this(state, operationId, method, path, null, status);
+    }
+  }
 
   /**
    * The daemon publishes no OpenAPI document — its API is a raw Vert.x server with no JAX-RS — so
@@ -70,7 +79,20 @@ class GoldenMasterRecordingTest {
               "listAvailableAgents",
               "GET",
               "/projects/container/{projectId}/agents/available",
-              503));
+              503),
+          new Interaction(
+              ProviderStates.A_DAEMON_WHOSE_FRONT_DESK_IS_RUNNING,
+              "promptFrontDesk",
+              "POST",
+              "/projects/container/{projectId}/front-desk/prompt",
+              "{\"text\":\"What is ready for dev?\"}",
+              200),
+          new Interaction(
+              ProviderStates.A_DAEMON_WHOSE_FRONT_DESK_IS_RUNNING,
+              "getFrontDeskLastAnswer",
+              "GET",
+              "/projects/container/{projectId}/front-desk/last-answer",
+              200));
 
   private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -115,6 +137,9 @@ class GoldenMasterRecordingTest {
       operation.put("operationId", interaction.operationId());
       operation.put("method", interaction.method());
       operation.put("path", interaction.path());
+      if (interaction.body() != null) {
+        operation.set("body", JSON.readTree(interaction.body()));
+      }
       operation.put("status", interaction.status());
       operation.put("file", file);
       ObjectNode frozen = operation.putObject("frozen");
@@ -172,11 +197,17 @@ class GoldenMasterRecordingTest {
     for (Map.Entry<String, String> param : params.entrySet()) {
       path = path.replace("{" + param.getKey() + "}", param.getValue());
     }
-    HttpRequest request =
+    HttpRequest.Builder builder =
         HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
-            .header("Authorization", "Bearer " + params.get("apiToken"))
-            .method(interaction.method(), HttpRequest.BodyPublishers.noBody())
-            .build();
+            .header("Authorization", "Bearer " + params.get("apiToken"));
+    if (interaction.body() == null) {
+      builder.method(interaction.method(), HttpRequest.BodyPublishers.noBody());
+    } else {
+      builder
+          .header("Content-Type", "application/json")
+          .method(interaction.method(), HttpRequest.BodyPublishers.ofString(interaction.body()));
+    }
+    HttpRequest request = builder.build();
     HttpResponse<String> response;
     try (HttpClient client = HttpClient.newHttpClient()) {
       response = client.send(request, HttpResponse.BodyHandlers.ofString());

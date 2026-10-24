@@ -41,6 +41,33 @@ public final class ProviderStates {
   public static final String A_DAEMON_WHOSE_AGENTS_ARE_NOT_WIRED_YET =
       "a daemon whose agents are not wired yet";
 
+  /**
+   * The daemon keeps a front desk (qits-1572): its kept command is RUNNING and idle, so {@code POST
+   * /front-desk/prompt} is typed at once ({@code delivered: true}), and its transcript holds one
+   * finished turn, so {@code GET /front-desk/last-answer} answers that turn's text.
+   */
+  public static final String A_DAEMON_WHOSE_FRONT_DESK_IS_RUNNING =
+      "a daemon whose front desk is running";
+
+  /** The front desk's kept command. */
+  static final String FRONT_DESK_COMMAND_ID = "00000000-0000-4000-8000-00000000fd01";
+
+  /** The Claude session the front desk's transcript names. */
+  static final String FRONT_DESK_SESSION_ID = "00000000-0000-4000-8000-00000000fd02";
+
+  /** The front desk's raw TRANSCRIPT channel: one prompt and one assistant text answer. */
+  static final List<String> FRONT_DESK_TRANSCRIPT =
+      List.of(
+          "{\"type\":\"user\",\"sessionId\":\""
+              + FRONT_DESK_SESSION_ID
+              + "\",\"timestamp\":\"2026-10-01T12:00:00.000Z\","
+              + "\"message\":{\"role\":\"user\",\"content\":\"What is ready for dev?\"}}",
+          "{\"type\":\"assistant\",\"sessionId\":\""
+              + FRONT_DESK_SESSION_ID
+              + "\",\"timestamp\":\"2026-10-01T12:00:05.000Z\","
+              + "\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\","
+              + "\"text\":\"Two tickets are ready for dev: qits-1 and qits-2.\"}]}}");
+
   static final String PROJECT_ID = "00000000-0000-4000-8000-000000000001";
 
   /** The shared secret qits-projects injects as {@code QITS_PROJECTS_DAEMON_API_TOKEN}. */
@@ -63,6 +90,7 @@ public final class ProviderStates {
   public ProviderStates() {
     states.put(A_DAEMON_WHOSE_HARNESSES_WERE_PROBED, this::aDaemonWhoseHarnessesWereProbed);
     states.put(A_DAEMON_WHOSE_AGENTS_ARE_NOT_WIRED_YET, this::aDaemonWhoseAgentsAreNotWiredYet);
+    states.put(A_DAEMON_WHOSE_FRONT_DESK_IS_RUNNING, this::aDaemonWhoseFrontDeskIsRunning);
   }
 
   /** Every state name this provider answers for. */
@@ -86,7 +114,33 @@ public final class ProviderStates {
   }
 
   private Setup aDaemonWhoseHarnessesWereProbed(Path root) {
-    List<HarnessCapabilities> capabilities =
+    return new Setup(
+        params(),
+        ContractSeams.startApi(
+            root, PROJECT_ID, API_TOKEN, IMAGE_VERSION, reportedBy(), probedHarnesses()));
+  }
+
+  private Setup aDaemonWhoseFrontDeskIsRunning(Path root) {
+    return new Setup(
+        params(),
+        ContractSeams.startApiWithFrontDesk(
+            root,
+            PROJECT_ID,
+            API_TOKEN,
+            IMAGE_VERSION,
+            reportedBy(),
+            probedHarnesses(),
+            FRONT_DESK_COMMAND_ID,
+            FRONT_DESK_TRANSCRIPT));
+  }
+
+  private static String reportedBy() {
+    return "project-agent/" + PROJECT_ID;
+  }
+
+  /** The boot-time harness report: one harness probed, one not installed. */
+  private static List<HarnessCapabilities> probedHarnesses() {
+    return
         List.of(
             new HarnessCapabilities(
                 AgentType.CLAUDE,
@@ -100,11 +154,6 @@ public final class ProviderStates {
                 false,
                 ""),
             HarnessCapabilities.shipped(AgentType.KIMI, "kimi is not installed in this image"));
-    String reportedBy = "project-agent/" + PROJECT_ID;
-    return new Setup(
-        params(),
-        ContractSeams.startApi(
-            root, PROJECT_ID, API_TOKEN, IMAGE_VERSION, reportedBy, capabilities));
   }
 
   private Setup aDaemonWhoseAgentsAreNotWiredYet(Path root) {
