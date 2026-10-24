@@ -62,7 +62,7 @@
         <!-- THE CONSUMER PACTS ConsumerPactVerificationTest verifies (ticket qits-1149): one jar per
              consumer that commits `pacts/<consumer>_qits-projects-daemon.json`, test scope. Exact
              pins; qits-maintenance bumps each when its consumer releases a changed pact. -->
-        <qits-projects-service-pacts-qits-projects-daemon.version>2026.1018.195756</qits-projects-service-pacts-qits-projects-daemon.version>
+        <qits-projects-service-pacts-qits-projects-daemon.version>2026.1024.114924</qits-projects-service-pacts-qits-projects-daemon.version>
 
         <!-- Where the platform publishes it. Overridden by CI (-Dqits.maven.repository.url), derived
              from QITS_DOMAIN; the default below is the public host. -->
