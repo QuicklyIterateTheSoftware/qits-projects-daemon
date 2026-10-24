@@ -260,4 +260,20 @@ class HookWebhookTest {
     webhook.handle("SessionStart", payload("SessionStart"), "cmd-1");
     assertEquals(AgentState.IDLE, lastSent().state());
   }
+
+  /** The front desk's inbox hears every stored state beside the launch service (qits-1572). */
+  @Test
+  void theActivityListenerHearsEveryStoredState() {
+    List<String> heard = new ArrayList<>();
+    notifying.setActivityListener((commandId, state) -> heard.add(commandId + ":" + state));
+
+    notifying.handle("SessionStart", payload("SessionStart"), "cmd-1");
+    notifying.handle("UserPromptSubmit", payload("UserPromptSubmit"), "cmd-1");
+    notifying.handle("Notification", payload("Notification"), "cmd-1");
+    // WAITING wins: the Stop is heard as the stored WAITING, never as IDLE.
+    notifying.handle("Stop", payload("Stop"), "cmd-1");
+
+    assertEquals(List.of("cmd-1:IDLE", "cmd-1:BUSY", "cmd-1:WAITING", "cmd-1:WAITING"), heard);
+    assertEquals("WAITING", activity.get("cmd-1"), "the launch service still hears it too");
+  }
 }

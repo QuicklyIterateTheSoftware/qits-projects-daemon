@@ -508,6 +508,58 @@ class DeliveryKeeperTest {
   }
 
   @Test
+  void theTickIsSkippedWhileTheInboxHasTurnsPending() {
+    boolean[] pending = {true};
+    DeliveryKeeper.Inbox inbox =
+        new DeliveryKeeper.Inbox() {
+          @Override
+          public boolean pending() {
+            return pending[0];
+          }
+
+          @Override
+          public void typed() {}
+
+          @Override
+          public <T> T exclusive(java.util.function.Supplier<T> action) {
+            return action.get();
+          }
+        };
+    DeliveryKeeper.Settings settings =
+        DeliveryKeeper.Settings.parse(
+            Optional.of("on"), Optional.of("PT10M"), Optional.of(TOKEN), Optional.of(SUBJECT));
+    frontDesk =
+        new FrontDeskKeeper(
+            Lifecycle.ALWAYS_ON,
+            new FrontDeskCredential(settings, SessionCredentialStore.withoutOwnToken()),
+            desk,
+            TIMING,
+            new VirtualScheduler(),
+            () -> now,
+            message -> {});
+    tick =
+        new DeliveryKeeper(
+            settings,
+            settings::runnable,
+            frontDesk::keptCommandId,
+            desk,
+            new VirtualScheduler(),
+            () -> now,
+            inbox);
+    frontDesk.start();
+    tick.start();
+    advance(0);
+
+    advance(INTERVAL.toMillis());
+    assertTrue(desk.typed.isEmpty(), "idle, but the inbox goes first");
+    assertEquals(1, tick.consecutiveSkips());
+
+    pending[0] = false;
+    advance(INTERVAL.toMillis());
+    assertEquals(1, desk.typed.size());
+  }
+
+  @Test
   void noTickWhileTheKeeperHasNoDesk() {
     desk.signedIn = false;
     start(Lifecycle.ALWAYS_ON, "on", TOKEN);

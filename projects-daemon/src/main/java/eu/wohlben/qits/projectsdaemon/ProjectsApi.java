@@ -55,6 +55,8 @@ import org.jboss.logging.Logger;
  *   POST /agents                       launch a coding agent
  *   POST /agents/sign-in               open a harness's sign-in terminal
  *   GET  /agent-sessions               the session lineage tree
+ *   POST /front-desk/prompt            type a turn into the kept front desk, or queue it
+ *   GET  /front-desk/last-answer       the kept front desk's latest answer
  *   WS   /terminal/commands/{id}       the interactive terminal
  *   WS   /chat/commands/{id}           the chat transport
  * </pre>
@@ -142,6 +144,12 @@ public class ProjectsApi {
   static final String AGENTS_SIGN_IN_PATH = "/agents/sign-in";
 
   static final String AGENT_SESSIONS_PATH = "/agent-sessions";
+
+  /** {@code POST /front-desk/prompt} — a turn for the kept front desk ({@link FrontDeskInbox}). */
+  static final String FRONT_DESK_PROMPT_PATH = "/front-desk/prompt";
+
+  /** {@code GET /front-desk/last-answer} — what the kept front desk answered last. */
+  static final String FRONT_DESK_LAST_ANSWER_PATH = "/front-desk/last-answer";
 
   private static final String BEARER = "Bearer ";
 
@@ -242,6 +250,14 @@ public class ProjectsApi {
    */
   private volatile SessionCredentialStore sessionCredentials =
       SessionCredentialStore.withoutOwnToken();
+
+  /** The front desk's inbox; null until wired, in which case its routes answer 503. */
+  private volatile FrontDeskInbox frontDeskInbox;
+
+  /** Wire the front desk's inbox. {@link ControlSocket} calls it beside {@link #wireAgents}. */
+  void wireFrontDesk(FrontDeskInbox frontDeskInbox) {
+    this.frontDeskInbox = frontDeskInbox;
+  }
 
   /** Wire the commands surface. */
   void wireCommands(
@@ -429,6 +445,16 @@ public class ProjectsApi {
       onBodyRequest(request, path, (method, body) -> dispatchAgent(method, path, body));
       return;
     }
+    if (path.equals(FRONT_DESK_PROMPT_PATH) || path.equals(FRONT_DESK_LAST_ANSWER_PATH)) {
+      FrontDeskInbox inbox = frontDeskInbox;
+      if (inbox == null) {
+        respond(request, 503, FrontDeskJson.refused("The front desk is not available yet"));
+        return;
+      }
+      onBodyRequest(
+          request, path, (method, body) -> dispatchFrontDesk(inbox, method, path, body));
+      return;
+    }
     respond(request, 404, ProjectsJson.error("No such endpoint"));
   }
 
@@ -582,6 +608,52 @@ public class ProjectsApi {
     } catch (RuntimeException e) {
       LOG.errorf(e, "projects-daemon agents API failed handling %s", path);
       return new Reply(500, ProjectsJson.error("Internal error"));
+    }
+  }
+
+  /**
+   * Route and run one {@code /front-desk} request (qits-1572). The bodies are a contract
+   * qits-projects passes through verbatim ({@link FrontDeskJson}).
+   */
+  private Reply dispatchFrontDesk(
+      FrontDeskInbox inbox, HttpMethod method, String path, String body) {
+    try {
+      if (FRONT_DESK_LAST_ANSWER_PATH.equals(path)) {
+        if (method != HttpMethod.GET) {
+          return new Reply(405, FrontDeskJson.refused("Method not allowed"));
+        }
+        return inbox
+            .lastAnswer()
+            .map(answer -> new Reply(200, FrontDeskJson.answer(answer)))
+            .orElseGet(() -> new Reply(404, FrontDeskJson.refused("No front desk is kept")));
+      }
+      if (method != HttpMethod.POST) {
+        return new Reply(405, FrontDeskJson.refused("Method not allowed"));
+      }
+      JsonObject json;
+      try {
+        json = jsonBody(body);
+      } catch (InvalidCommandRequestException e) {
+        return new Reply(400, FrontDeskJson.refused(e.getMessage()));
+      }
+      String text = json.getValue("text") instanceof String value ? value : null;
+      if (text == null || text.isBlank()) {
+        return new Reply(400, FrontDeskJson.refused("text is required"));
+      }
+      FrontDeskInbox.Outcome outcome = inbox.prompt(text);
+      return switch (outcome.kind()) {
+        case DELIVERED, QUEUED -> new Reply(200, FrontDeskJson.prompted(outcome));
+        case NO_DESK ->
+            new Reply(409, FrontDeskJson.refused("The front desk is not running"));
+        case FULL ->
+            new Reply(
+                429,
+                FrontDeskJson.refused(
+                    "The front desk inbox is full (" + FrontDeskInbox.CAPACITY + " turns)"));
+      };
+    } catch (RuntimeException e) {
+      LOG.errorf(e, "projects-daemon front desk API failed handling %s", path);
+      return new Reply(500, FrontDeskJson.refused("Internal error"));
     }
   }
 

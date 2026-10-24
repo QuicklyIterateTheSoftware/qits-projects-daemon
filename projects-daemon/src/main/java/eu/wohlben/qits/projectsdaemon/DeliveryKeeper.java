@@ -55,6 +55,10 @@ import org.jboss.logging.Logger;
  * is remembered, and only for the log; a tick that writes resets it to zero. The next skipped (or
  * written) tick comes a full interval later either way. Ticks never queue: each schedules the next
  * only once it is done, on this class's one worker thread.
+ *
+ * <p><b>The inbox goes first</b> (qits-1572). Turns qits types through {@link FrontDeskInbox} and
+ * the tick share one lock ({@link Inbox#exclusive}), so their keystrokes never interleave, and a
+ * tick that finds turns pending in the inbox is skipped with the reason {@code inbox}.
  */
 final class DeliveryKeeper {
 
@@ -252,12 +256,43 @@ final class DeliveryKeeper {
     }
   }
 
+  /** What the tick needs of {@link FrontDeskInbox}, so a test can run without one. */
+  interface Inbox {
+
+    /** Whether turns wait: queued, or typed and not yet started. */
+    boolean pending();
+
+    /** The tick typed a turn; the inbox treats it as one of its own until it starts. */
+    void typed();
+
+    /** Run {@code action} under the one lock every writer into the front desk holds. */
+    <T> T exclusive(Supplier<T> action);
+
+    /** No inbox: nothing pending, and nobody else to exclude. */
+    Inbox NONE =
+        new Inbox() {
+          @Override
+          public boolean pending() {
+            return false;
+          }
+
+          @Override
+          public void typed() {}
+
+          @Override
+          public <T> T exclusive(Supplier<T> action) {
+            return action.get();
+          }
+        };
+  }
+
   private final Settings settings;
   private final BooleanSupplier delivering;
   private final Supplier<Optional<String>> frontDesk;
   private final Session session;
   private final Scheduler scheduler;
   private final LongSupplier clock;
+  private final Inbox inbox;
 
   private volatile boolean started;
   private volatile boolean stopped;
@@ -290,12 +325,28 @@ final class DeliveryKeeper {
       Session session,
       Scheduler scheduler,
       LongSupplier clock) {
+    this(settings, delivering, frontDesk, session, scheduler, clock, Inbox.NONE);
+  }
+
+  /**
+   * @param inbox the front desk's inbox ({@link FrontDeskInbox}): its lock is held around every
+   *     tick, and a tick is skipped while it has turns pending
+   */
+  DeliveryKeeper(
+      Settings settings,
+      BooleanSupplier delivering,
+      Supplier<Optional<String>> frontDesk,
+      Session session,
+      Scheduler scheduler,
+      LongSupplier clock,
+      Inbox inbox) {
     this.settings = settings;
     this.delivering = delivering;
     this.frontDesk = frontDesk;
     this.session = session;
     this.scheduler = scheduler;
     this.clock = clock;
+    this.inbox = inbox == null ? Inbox.NONE : inbox;
   }
 
   /** Begin ticking the front desk, once; a no-op unless delivery is on. */
@@ -342,9 +393,22 @@ final class DeliveryKeeper {
       LOG.debug("Delivery tick skipped: the front desk holds no delivery rights.");
       return;
     }
+    inbox.exclusive(
+        () -> {
+          nudgeExclusively();
+          return null;
+        });
+  }
+
+  /** The check-and-type, under the inbox's lock so no inbox turn is typed in between. */
+  private void nudgeExclusively() {
     Optional<String> kept = frontDesk.get();
     if (kept.isEmpty() || !session.running(kept.get())) {
       skip("the front desk the keeper launched is not running");
+      return;
+    }
+    if (inbox.pending()) {
+      skip("inbox");
       return;
     }
     String commandId = kept.get();
@@ -361,6 +425,7 @@ final class DeliveryKeeper {
       skip(String.valueOf(written));
       return;
     }
+    inbox.typed();
     consecutiveSkips = 0;
   }
 

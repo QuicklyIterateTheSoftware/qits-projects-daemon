@@ -15,10 +15,12 @@ import eu.wohlben.qits.agents.LocalProcessExecutor;
 import eu.wohlben.qits.agents.ProcessRunner;
 import eu.wohlben.qits.agents.WorkLinkProjects;
 import eu.wohlben.qits.commands.CommandLifecycleService;
+import eu.wohlben.qits.commands.CommandLogLine;
 import eu.wohlben.qits.commands.CommandLogService;
 import eu.wohlben.qits.commands.CommandRegistry;
 import eu.wohlben.qits.commands.CommandService;
 import eu.wohlben.qits.commands.CommandStore;
+import eu.wohlben.qits.commands.LogChannel;
 import eu.wohlben.qits.projectsdaemon.protocol.DaemonCodec;
 import eu.wohlben.qits.projectsdaemon.protocol.DaemonLog;
 import eu.wohlben.qits.projectsdaemon.protocol.DaemonMessage;
@@ -397,6 +399,12 @@ public class ControlSocket {
   volatile DeliveryKeeper deliveryTick;
 
   /**
+   * The front desk's inbox {@link #wireAgents} built beside {@link #deliveryTick}: the turns {@code
+   * POST /front-desk/prompt} types or queues. Null when the agent surface stayed unwired.
+   */
+  volatile FrontDeskInbox frontDeskInbox;
+
+  /**
    * The per-session credentials qits sends over this socket ({@link SessionCredentials},
    * qits-1482), which every agent launch picks its {@code QITS_TOKEN} from. Until the first frame
    * — an older qits sends none — launches run as they did before it (legacy mode).
@@ -746,21 +754,41 @@ public class ControlSocket {
             System::currentTimeMillis,
             this::send);
     frontDesk = keeper;
+    DeliveryKeeper.Session deskSession =
+        DeliveryKeeper.Session.of(
+            store,
+            commandRegistry,
+            agentCommands,
+            commandId -> {
+              HookWebhook webhook = hooks;
+              return webhook == null ? Optional.empty() : webhook.lastState(commandId);
+            });
+    // Turns qits types into the desk (qits-1572). It shares one lock with the tick below, and hears
+    // the webhook's activity to flush its queue on IDLE.
+    FrontDeskInbox inbox =
+        new FrontDeskInbox(
+            keeper::keptCommandId,
+            deskSession,
+            commandId ->
+                logs.log(commandId, null, LogChannel.TRANSCRIPT).stream()
+                    .map(CommandLogLine::content)
+                    .toList(),
+            FrontDeskKeeper.Scheduler.worker(),
+            System::currentTimeMillis);
+    frontDeskInbox = inbox;
+    if (h != null) {
+      h.setActivityListener(inbox::onActivity);
+    }
     deliveryTick =
         new DeliveryKeeper(
             deliverySettings,
             frontDeskCredential::delivering,
             keeper::keptCommandId,
-            DeliveryKeeper.Session.of(
-                store,
-                commandRegistry,
-                agentCommands,
-                commandId -> {
-                  HookWebhook webhook = hooks;
-                  return webhook == null ? Optional.empty() : webhook.lastState(commandId);
-                }),
+            deskSession,
             FrontDeskKeeper.Scheduler.worker(),
-            System::currentTimeMillis);
+            System::currentTimeMillis,
+            inbox);
+    projectsApi.wireFrontDesk(inbox);
     projectsApi.wireSessions(sessionCredentials);
     projectsApi.wireAgents(
         launch,
@@ -1146,6 +1174,10 @@ public class ControlSocket {
     DeliveryKeeper ticking = deliveryTick;
     if (ticking != null) {
       ticking.stop();
+    }
+    FrontDeskInbox inbox = frontDeskInbox;
+    if (inbox != null) {
+      inbox.stop();
     }
     // Agents go first, before anything else is torn down — see stopAgents for why.
     stopAgents(commands);

@@ -1,0 +1,13 @@
+{"type":"summary","summary":"Front desk","leafUuid":"u-0"}
+{"type":"user","isSidechain":false,"sessionId":"sess-1","timestamp":"2026-10-24T09:00:00.000Z","message":{"role":"user","content":"What is the oldest open ticket?"}}
+{"type":"assistant","isSidechain":false,"sessionId":"sess-1","timestamp":"2026-10-24T09:00:05.000Z","message":{"role":"assistant","content":[{"type":"text","text":"An earlier answer that must not be returned."}]}}
+{"type":"user","isSidechain":false,"sessionId":"sess-1","timestamp":"2026-10-24T09:10:00.000Z","message":{"role":"user","content":[{"type":"text","text":"Summarise the delivery state."}]}}
+{"type":"assistant","isSidechain":false,"sessionId":"sess-1","timestamp":"2026-10-24T09:10:02.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Let me look at the board first.","signature":"x"}]}}
+{"type":"assistant","isSidechain":false,"sessionId":"sess-1","timestamp":"2026-10-24T09:10:03.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Checking the board."}]}}
+{"type":"assistant","isSidechain":false,"sessionId":"sess-1","timestamp":"2026-10-24T09:10:04.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"qits work list"}}]}}
+{"type":"user","isSidechain":false,"sessionId":"sess-1","timestamp":"2026-10-24T09:10:06.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"qits-1572 IN_PROGRESS"}]},"toolUseResult":{"stdout":"qits-1572 IN_PROGRESS"}}
+{"type":"user","isSidechain":true,"sessionId":"sess-1","timestamp":"2026-10-24T09:10:07.000Z","message":{"role":"user","content":"A subagent's prompt, not the person's."}}
+{"type":"user","isMeta":true,"isSidechain":false,"sessionId":"sess-1","timestamp":"2026-10-24T09:10:07.500Z","message":{"role":"user","content":"<local-command-caveat>meta</local-command-caveat>"}}
+{"type":"assistant","isSidechain":false,"sessionId":"sess-1","timestamp":"2026-10-24T09:10:09.000Z","message":{"role":"assistant","content":[{"type":"text","text":"One ticket is in progress: qits-1572."},{"type":"tool_use","id":"toolu_2","name":"Read","input":{}}]}}
+not json at all
+{"type":"system","isSidechain":false,"sessionId":"sess-1","timestamp":"2026-10-24T09:10:10.000Z","content":"turn ended"}

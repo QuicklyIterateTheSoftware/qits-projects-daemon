@@ -82,6 +82,13 @@ final class HookWebhook {
    */
   private volatile BiConsumer<String, String> agentLaunch;
 
+  /**
+   * Hears every stored state per command, beside {@link #agentLaunch}: the front desk's inbox
+   * ({@link FrontDeskInbox#onActivity}), which flushes a queued turn on {@code IDLE}. Null until
+   * {@link ControlSocket#wireAgents} sets it.
+   */
+  private volatile BiConsumer<String, String> activityListener;
+
   private volatile HttpServer server;
 
   HookWebhook(Vertx vertx, int port, Consumer<DaemonMessage> send) {
@@ -98,6 +105,11 @@ final class HookWebhook {
   /** Test seam: wire a bare listener instead of a real {@link AgentLaunchService}. */
   void setAgentLaunch(BiConsumer<String, String> listener) {
     this.agentLaunch = listener;
+  }
+
+  /** Wires the listener that hears every stored state ({@link FrontDeskInbox#onActivity}). */
+  void setActivityListener(BiConsumer<String, String> listener) {
+    this.activityListener = listener;
   }
 
   void start() {
@@ -177,13 +189,20 @@ final class HookWebhook {
    */
   private void notifyAgentLaunch(String commandId, String state) {
     BiConsumer<String, String> listener = agentLaunch;
-    if (listener == null) {
-      return;
+    if (listener != null) {
+      try {
+        listener.accept(commandId, state);
+      } catch (RuntimeException e) {
+        LOG.debugf(e, "AgentLaunchService.onActivity failed for command %s", commandId);
+      }
     }
-    try {
-      listener.accept(commandId, state);
-    } catch (RuntimeException e) {
-      LOG.debugf(e, "AgentLaunchService.onActivity failed for command %s", commandId);
+    BiConsumer<String, String> activity = activityListener;
+    if (activity != null) {
+      try {
+        activity.accept(commandId, state);
+      } catch (RuntimeException e) {
+        LOG.debugf(e, "The activity listener failed for command %s", commandId);
+      }
     }
   }
 

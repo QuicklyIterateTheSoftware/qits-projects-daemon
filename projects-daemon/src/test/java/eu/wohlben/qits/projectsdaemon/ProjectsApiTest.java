@@ -308,4 +308,137 @@ class ProjectsApiTest {
     assertEquals(404, get(BASE + BASE + "/commands", TOKEN).status());
     assertEquals(200, get(BASE + "/commands", TOKEN).status());
   }
+
+  // --- the front desk (qits-1572) ---------------------------------------------------------------
+
+  /** The kept command, its state and what was typed, behind the inbox the routes are wired to. */
+  private Optional<String> kept = Optional.of("cmd-desk");
+
+  private final Map<String, String> deskStates = new java.util.HashMap<>();
+  private final List<String> typed = new java.util.ArrayList<>();
+
+  private void wireFrontDesk() {
+    DeliveryKeeper.Session session =
+        new DeliveryKeeper.Session() {
+          @Override
+          public boolean running(String commandId) {
+            return "cmd-desk".equals(commandId);
+          }
+
+          @Override
+          public Optional<String> activityState(String commandId) {
+            return Optional.ofNullable(deskStates.get(commandId));
+          }
+
+          @Override
+          public eu.wohlben.qits.commands.GuardedInput send(String commandId, String text) {
+            typed.add(text);
+            return eu.wohlben.qits.commands.GuardedInput.WRITTEN;
+          }
+        };
+    api.wireFrontDesk(
+        new FrontDeskInbox(
+            () -> kept,
+            session,
+            commandId ->
+                List.of(
+                    "{\"type\":\"user\",\"sessionId\":\"sess-9\",\"message\":{\"content\":\"hi\"}}",
+                    "{\"type\":\"assistant\",\"sessionId\":\"sess-9\","
+                        + "\"timestamp\":\"2026-10-24T10:00:00Z\","
+                        + "\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}"),
+            new FrontDeskKeeper.Scheduler() {
+              @Override
+              public void schedule(Runnable step, long delayMs) {
+                step.run();
+              }
+
+              @Override
+              public void shutdown() {}
+            },
+            System::currentTimeMillis));
+  }
+
+  @Test
+  void theFrontDeskAnswers503UntilItIsWired() {
+    assertEquals(503, get(BASE + "/front-desk/last-answer", TOKEN).status());
+    assertEquals(401, get(BASE + "/front-desk/last-answer", null).status(), "and is gated");
+  }
+
+  @Test
+  void aPromptIsDeliveredToAnIdleDeskAndQueuedBehindABusyOne() {
+    wireFrontDesk();
+    deskStates.put("cmd-desk", "IDLE");
+
+    Answer delivered = post(BASE + "/front-desk/prompt", TOKEN, new JsonObject().put("text", "go"));
+    assertEquals(200, delivered.status());
+    assertEquals(
+        new JsonObject()
+            .put("commandId", "cmd-desk")
+            .put("state", "IDLE")
+            .put("delivered", true)
+            .put("queued", false)
+            .putNull("position"),
+        delivered.body());
+    assertEquals(List.of("go"), typed);
+
+    deskStates.put("cmd-desk", "BUSY");
+    Answer queued = post(BASE + "/front-desk/prompt", TOKEN, new JsonObject().put("text", "next"));
+    assertEquals(200, queued.status());
+    assertEquals(
+        new JsonObject()
+            .put("commandId", "cmd-desk")
+            .put("state", "BUSY")
+            .put("delivered", false)
+            .put("queued", true)
+            .put("position", 1),
+        queued.body());
+  }
+
+  @Test
+  void aPromptIsRefusedWithTheContractsStatusCodes() {
+    wireFrontDesk();
+    deskStates.put("cmd-desk", "BUSY");
+
+    Answer missing = post(BASE + "/front-desk/prompt", TOKEN, new JsonObject());
+    assertEquals(400, missing.status());
+    assertTrue(missing.body().containsKey("reason"));
+    assertEquals(
+        400, post(BASE + "/front-desk/prompt", TOKEN, new JsonObject().put("text", " ")).status());
+
+    for (int i = 0; i < FrontDeskInbox.CAPACITY; i++) {
+      assertEquals(
+          200,
+          post(BASE + "/front-desk/prompt", TOKEN, new JsonObject().put("text", "t" + i)).status());
+    }
+    Answer full = post(BASE + "/front-desk/prompt", TOKEN, new JsonObject().put("text", "more"));
+    assertEquals(429, full.status());
+    assertTrue(full.body().containsKey("reason"));
+
+    kept = Optional.empty();
+    Answer noDesk = post(BASE + "/front-desk/prompt", TOKEN, new JsonObject().put("text", "hi"));
+    assertEquals(409, noDesk.status());
+    assertTrue(noDesk.body().containsKey("reason"));
+  }
+
+  @Test
+  void theLastAnswerIsServedAnd404sWithoutAKeptDesk() {
+    wireFrontDesk();
+    deskStates.put("cmd-desk", "IDLE");
+
+    Answer answer = get(BASE + "/front-desk/last-answer", TOKEN);
+    assertEquals(200, answer.status());
+    assertEquals(
+        new JsonObject()
+            .put("commandId", "cmd-desk")
+            .put("sessionId", "sess-9")
+            .put("state", "IDLE")
+            .put("text", "hello")
+            .put("at", "2026-10-24T10:00:00Z"),
+        answer.body());
+
+    kept = Optional.empty();
+    Answer none = get(BASE + "/front-desk/last-answer", TOKEN);
+    assertEquals(404, none.status());
+    assertTrue(none.body().containsKey("reason"));
+  }
 }
