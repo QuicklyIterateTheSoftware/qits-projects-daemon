@@ -6,6 +6,7 @@ import eu.wohlben.qits.commands.CommandLogService;
 import eu.wohlben.qits.commands.CommandRegistry;
 import eu.wohlben.qits.commands.CommandService;
 import eu.wohlben.qits.commands.CommandStore;
+import eu.wohlben.qits.commands.GuardedInput;
 import io.vertx.core.Vertx;
 import java.nio.file.Path;
 import java.util.List;
@@ -67,6 +68,60 @@ public final class ContractSeams {
    */
   public static RunningApi startApiBeforeAgents(Path root, String projectId, String apiToken) {
     return start(root, projectId, apiToken, null, null, List.of(), false);
+  }
+
+  /**
+   * The API with its agent surface wired (as {@link #startApi}) and a front desk inbox whose kept
+   * command {@code keptCommandId} is RUNNING and last reported {@code IDLE}, so {@code POST
+   * /front-desk/prompt} is typed at once (and swallowed: no PTY runs), and whose TRANSCRIPT channel
+   * holds {@code transcript} for {@code GET /front-desk/last-answer} to read.
+   */
+  public static RunningApi startApiWithFrontDesk(
+      Path root,
+      String projectId,
+      String apiToken,
+      String imageVersion,
+      String reportedBy,
+      List<HarnessCapabilities> capabilities,
+      String keptCommandId,
+      List<String> transcript) {
+    RunningApi running =
+        start(root, projectId, apiToken, imageVersion, reportedBy, capabilities, true);
+    DeliveryKeeper.Session session =
+        new DeliveryKeeper.Session() {
+          @Override
+          public boolean running(String commandId) {
+            return keptCommandId.equals(commandId);
+          }
+
+          @Override
+          public Optional<String> activityState(String commandId) {
+            return keptCommandId.equals(commandId) ? Optional.of("IDLE") : Optional.empty();
+          }
+
+          @Override
+          public GuardedInput send(String commandId, String text) {
+            return keptCommandId.equals(commandId)
+                ? GuardedInput.WRITTEN
+                : GuardedInput.NOT_RUNNING;
+          }
+        };
+    FrontDeskKeeper.Scheduler never =
+        new FrontDeskKeeper.Scheduler() {
+          @Override
+          public void schedule(Runnable step, long delayMs) {}
+
+          @Override
+          public void shutdown() {}
+        };
+    running.api.wireFrontDesk(
+        new FrontDeskInbox(
+            () -> Optional.of(keptCommandId),
+            session,
+            commandId -> keptCommandId.equals(commandId) ? transcript : List.of(),
+            never,
+            () -> 0L));
+    return running;
   }
 
   private static RunningApi start(

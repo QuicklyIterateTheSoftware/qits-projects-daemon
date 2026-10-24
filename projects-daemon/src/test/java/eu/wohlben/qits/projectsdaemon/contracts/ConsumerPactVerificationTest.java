@@ -123,4 +123,9 @@ class ConsumerPactVerificationTest {
   Map<String, String> aDaemonWhoseAgentsAreNotWiredYet() {
     return running == null ? Map.of() : running.params();
   }
+
+  @State(ProviderStates.A_DAEMON_WHOSE_FRONT_DESK_IS_RUNNING)
+  Map<String, String> aDaemonWhoseFrontDeskIsRunning() {
+    return running == null ? Map.of() : running.params();
+  }
 }
