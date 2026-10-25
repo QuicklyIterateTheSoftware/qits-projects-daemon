@@ -9,56 +9,30 @@ import eu.wohlben.qits.commands.CommandStatus;
 import eu.wohlben.qits.commands.CommandStore;
 import eu.wohlben.qits.commands.GuardedInput;
 import eu.wohlben.qits.projectsdaemon.FrontDeskKeeper.Lifecycle;
-import eu.wohlben.qits.projectsdaemon.FrontDeskKeeper.Scheduler;
-import eu.wohlben.qits.projectsdaemon.protocol.DaemonProtocol.AgentState;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
-import java.time.Duration;
-import java.time.Instant;
-import java.time.format.DateTimeParseException;
-import java.util.Locale;
 import java.util.Optional;
-import java.util.function.BooleanSupplier;
 import java.util.function.Function;
-import java.util.function.LongSupplier;
-import java.util.function.Supplier;
 import org.jboss.logging.Logger;
 
 /**
- * Runs the project's delivery loop as turns in the front desk session (qits-1440): every {@code
- * delivery-interval} it types one {@link #tickTurn} into the {@code project.work} session {@link
- * FrontDeskKeeper} launched and keeps.
+ * The delivery desk's share of the daemon: the delivery settings, the loop's brief, and the seam
+ * into the front desk session.
+ *
+ * <p><b>Nothing types turns on a schedule</b> (qits-1597). The timer that used to type a delivery
+ * pass into the front desk (qits-1440) is gone, its setting with it, and nothing replaces it: the
+ * desk runs a pass only when a person prompts it — in the session itself, or through {@link
+ * FrontDeskInbox} ({@code POST /front-desk/prompt}).
  *
  * <p><b>One desk, one session</b> (owner ruling, 2026-10-22). There is no separate {@code
  * project.delivery} session: the front desk holds the desk's delivery rights — the delivery token,
- * {@code qits:desk}, handed to it at launch by {@link FrontDeskCredential} — and the loop is a turn
- * like any other in it. This class launches nothing. The {@code project.delivery} surface survives
- * only as the store of the loop's brief ({@link #writeBrief}), which the tick turn points at.
- *
- * <p><b>It ticks</b> only when {@code qits.projects-daemon.delivery} is {@code on}; otherwise it logs
- * once at INFO and does nothing. With the switch on, each tick also needs the front desk to hold
- * the delivery rights ({@link FrontDeskCredential#delivering()}): the delivery token before qits
- * sends session credentials (legacy), the {@code front-desk} credential after (qits-1482). A tick
- * without them is skipped at DEBUG — under an older qits that never sets a token, that is the old
- * "no token, no loop", one quiet line per interval.
- *
- * <p><b>The tick</b> goes to the keeper's own command ({@link FrontDeskKeeper#keptCommandId()}),
- * never to a {@code project.work} session a person started from the desk panel — that one is
- * scrubbed and holds no delivery rights. It is typed when that command is RUNNING and its last
- * reported activity is {@code IDLE}. Busy, waiting on a permission prompt, not yet heard from, not
- * running, or holding a person's unsent draft: the tick is skipped. The first two consecutive skips
- * log at DEBUG; the third, and every one after it, logs at INFO, naming the reason plus how many
- * ticks in a row were skipped and since when. Only that count — and when the run of skips started —
- * is remembered, and only for the log; a tick that writes resets it to zero. The next skipped (or
- * written) tick comes a full interval later either way. Ticks never queue: each schedules the next
- * only once it is done, on this class's one worker thread.
- *
- * <p><b>The inbox goes first</b> (qits-1572). Turns qits types through {@link FrontDeskInbox} and
- * the tick share one lock ({@link Inbox#exclusive}), so their keystrokes never interleave, and a
- * tick that finds turns pending in the inbox is skipped with the reason {@code inbox}.
+ * {@code qits:desk}, handed to it at launch by {@link FrontDeskCredential} — while {@link Settings}
+ * say delivery is {@code on}. This class launches nothing. The {@code project.delivery} surface
+ * survives only as the store of the loop's brief ({@link #writeBrief}), written at boot to {@link
+ * #BRIEF_PATH} for a prompted pass to read.
  */
 final class DeliveryKeeper {
 
@@ -67,31 +41,8 @@ final class DeliveryKeeper {
   /** The surface whose {@code systemPrompt} is the loop's brief. Nothing launches it. */
   static final AgentSurface BRIEF_SURFACE = AgentSurface.PROJECT_DELIVERY;
 
-  /** Where the brief is written, and what the tick turn tells the session to read. */
+  /** Where the brief is written at boot, for a prompted delivery pass to read. */
   static final Path BRIEF_PATH = Path.of("/tmp/qits-delivery-brief.md");
-
-  /** The tick interval when none (or an unreadable one) is configured. */
-  static final Duration DEFAULT_INTERVAL = Duration.ofMinutes(10);
-
-  /** What {@link #start()} logs when there is nothing to tick, so a test can name it. */
-  static final String OFF_MESSAGE =
-      "Delivery is off (qits.projects-daemon.delivery): the front desk runs no delivery loop.";
-
-  static final String NO_TOKEN_MESSAGE =
-      "Delivery is on but no delivery token is set (QITS_DELIVERY_TOKEN): the front desk runs no"
-          + " delivery loop until qits sends it session credentials.";
-
-  /**
-   * The turn one tick types: one pass of the loop by the brief, stamped so the transcript tells
-   * ticks apart.
-   */
-  static String tickTurn(Instant now) {
-    return "Run one pass of the delivery loop: read "
-        + BRIEF_PATH
-        + " and follow it. (tick "
-        + now
-        + ")";
-  }
 
   /**
    * The brief: the {@code project.delivery} surface's {@code systemPrompt} from the injected agent
@@ -147,31 +98,25 @@ final class DeliveryKeeper {
    * The delivery settings, as {@link ControlSocket} read them.
    *
    * @param enabled {@code qits.projects-daemon.delivery} is {@code on}
-   * @param interval how often the loop is nudged
    * @param token the delivery token, or blank
    * @param tokenSubject whom it names, or blank
    */
-  record Settings(boolean enabled, Duration interval, String token, String tokenSubject) {
+  record Settings(boolean enabled, String token, String tokenSubject) {
 
     /** Delivery off, as an unset configuration reads. */
-    static final Settings OFF = new Settings(false, DEFAULT_INTERVAL, "", "");
+    static final Settings OFF = new Settings(false, "", "");
 
     /**
      * Lenient, like {@link Lifecycle#parse}: {@code on} (any case) is on, unset or blank is off, and
      * anything else logs one WARN and is off — a typo must not hand the desk rights nobody asked
-     * for. An interval that is not a positive ISO-8601 duration logs one WARN and is {@link
-     * #DEFAULT_INTERVAL}.
+     * for.
      */
     static Settings parse(
-        Optional<String> delivery,
-        Optional<String> interval,
-        Optional<String> token,
-        Optional<String> tokenSubject) {
-      return new Settings(
-          enabled(delivery), interval(interval), valueOf(token), valueOf(tokenSubject));
+        Optional<String> delivery, Optional<String> token, Optional<String> tokenSubject) {
+      return new Settings(enabled(delivery), valueOf(token), valueOf(tokenSubject));
     }
 
-    /** Whether the front desk runs the delivery loop: on, and a token to run it with. */
+    /** Whether the front desk holds the delivery rights by these settings: on, and a token. */
     boolean runnable() {
       return enabled && !token.isBlank();
     }
@@ -190,32 +135,14 @@ final class DeliveryKeeper {
       return false;
     }
 
-    private static Duration interval(Optional<String> configured) {
-      String value = valueOf(configured).trim();
-      if (value.isEmpty()) {
-        return DEFAULT_INTERVAL;
-      }
-      try {
-        Duration parsed = Duration.parse(value.toUpperCase(Locale.ROOT));
-        if (!parsed.isNegative() && !parsed.isZero()) {
-          return parsed;
-        }
-      } catch (DateTimeParseException e) {
-        // reported below
-      }
-      LOG.warnf(
-          "Unreadable qits.projects-daemon.delivery-interval '%s' (expected a positive ISO-8601"
-              + " duration such as PT10M); using %s.",
-          value, DEFAULT_INTERVAL);
-      return DEFAULT_INTERVAL;
-    }
-
     private static String valueOf(Optional<String> configured) {
       return configured == null ? "" : configured.orElse("");
     }
   }
 
-  /** What the tick needs of the front desk's session, behind one seam a test can fake. */
+  /**
+   * What {@link FrontDeskInbox} needs of the front desk's session, behind one seam a test can fake.
+   */
   interface Session {
 
     /** Whether {@code commandId} is RUNNING. */
@@ -254,201 +181,5 @@ final class DeliveryKeeper {
         }
       };
     }
-  }
-
-  /** What the tick needs of {@link FrontDeskInbox}, so a test can run without one. */
-  interface Inbox {
-
-    /** Whether turns wait: queued, or typed and not yet started. */
-    boolean pending();
-
-    /** The tick typed a turn; the inbox treats it as one of its own until it starts. */
-    void typed();
-
-    /** Run {@code action} under the one lock every writer into the front desk holds. */
-    <T> T exclusive(Supplier<T> action);
-
-    /** No inbox: nothing pending, and nobody else to exclude. */
-    Inbox NONE =
-        new Inbox() {
-          @Override
-          public boolean pending() {
-            return false;
-          }
-
-          @Override
-          public void typed() {}
-
-          @Override
-          public <T> T exclusive(Supplier<T> action) {
-            return action.get();
-          }
-        };
-  }
-
-  private final Settings settings;
-  private final BooleanSupplier delivering;
-  private final Supplier<Optional<String>> frontDesk;
-  private final Session session;
-  private final Scheduler scheduler;
-  private final LongSupplier clock;
-  private final Inbox inbox;
-
-  private volatile boolean started;
-  private volatile boolean stopped;
-
-  // Touched only on this keeper's one worker thread (the scheduler that runs tick()/nudge()).
-  private int consecutiveSkips;
-  private Instant skippedSince;
-
-  /**
-   * @param frontDesk the command the front desk keeper launched and keeps ({@link
-   *     FrontDeskKeeper#keptCommandId()}) — the only session a tick is typed into
-   */
-  DeliveryKeeper(
-      Settings settings,
-      Supplier<Optional<String>> frontDesk,
-      Session session,
-      Scheduler scheduler,
-      LongSupplier clock) {
-    this(settings, settings::runnable, frontDesk, session, scheduler, clock);
-  }
-
-  /**
-   * @param delivering whether the front desk holds the delivery rights now ({@link
-   *     FrontDeskCredential#delivering()}), asked on every tick
-   */
-  DeliveryKeeper(
-      Settings settings,
-      BooleanSupplier delivering,
-      Supplier<Optional<String>> frontDesk,
-      Session session,
-      Scheduler scheduler,
-      LongSupplier clock) {
-    this(settings, delivering, frontDesk, session, scheduler, clock, Inbox.NONE);
-  }
-
-  /**
-   * @param inbox the front desk's inbox ({@link FrontDeskInbox}): its lock is held around every
-   *     tick, and a tick is skipped while it has turns pending
-   */
-  DeliveryKeeper(
-      Settings settings,
-      BooleanSupplier delivering,
-      Supplier<Optional<String>> frontDesk,
-      Session session,
-      Scheduler scheduler,
-      LongSupplier clock,
-      Inbox inbox) {
-    this.settings = settings;
-    this.delivering = delivering;
-    this.frontDesk = frontDesk;
-    this.session = session;
-    this.scheduler = scheduler;
-    this.clock = clock;
-    this.inbox = inbox == null ? Inbox.NONE : inbox;
-  }
-
-  /** Begin ticking the front desk, once; a no-op unless delivery is on. */
-  void start() {
-    if (!settings.enabled()) {
-      LOG.info(OFF_MESSAGE);
-      return;
-    }
-    if (!settings.runnable()) {
-      // Under an older qits this is final; a newer one hands the rights over the control socket.
-      LOG.info(NO_TOKEN_MESSAGE);
-    }
-    if (started || stopped) {
-      return;
-    }
-    started = true;
-    LOG.infof("Delivery is on: ticking the front desk every %s.", settings.interval());
-    scheduler.schedule(this::tick, settings.interval().toMillis());
-  }
-
-  /** Stop ticking; the session itself is the front desk keeper's. */
-  void stop() {
-    stopped = true;
-    scheduler.shutdown();
-  }
-
-  /** One tick: nudge the session if it is idle, then schedule the next one. */
-  private void tick() {
-    if (stopped) {
-      return;
-    }
-    try {
-      nudge();
-    } catch (RuntimeException e) {
-      LOG.warnf("The delivery tick failed: %s", e.getMessage());
-    }
-    scheduler.schedule(this::tick, settings.interval().toMillis());
-  }
-
-  private void nudge() {
-    if (!delivering.getAsBoolean()) {
-      // No rights to run the loop with: no token and no session credentials. Not a run of skips
-      // worth escalating — it is the steady state of a desk whose qits gave it neither.
-      LOG.debug("Delivery tick skipped: the front desk holds no delivery rights.");
-      return;
-    }
-    inbox.exclusive(
-        () -> {
-          nudgeExclusively();
-          return null;
-        });
-  }
-
-  /** The check-and-type, under the inbox's lock so no inbox turn is typed in between. */
-  private void nudgeExclusively() {
-    Optional<String> kept = frontDesk.get();
-    if (kept.isEmpty() || !session.running(kept.get())) {
-      skip("the front desk the keeper launched is not running");
-      return;
-    }
-    if (inbox.pending()) {
-      skip("inbox");
-      return;
-    }
-    String commandId = kept.get();
-    Optional<String> state = session.activityState(commandId);
-    if (!state.map(AgentState.IDLE::equalsIgnoreCase).orElse(false)) {
-      skip(
-          "the front desk is "
-              + state.map(value -> value.toLowerCase(Locale.ROOT)).orElse("not reported yet"));
-      return;
-    }
-    GuardedInput written =
-        session.send(commandId, tickTurn(Instant.ofEpochMilli(clock.getAsLong())));
-    if (written != GuardedInput.WRITTEN) {
-      skip(String.valueOf(written));
-      return;
-    }
-    inbox.typed();
-    consecutiveSkips = 0;
-  }
-
-  /**
-   * Record one skipped tick and log it: DEBUG for the first two in a row, INFO from the third on —
-   * named with {@code reason}, the running count and when the run started.
-   */
-  private void skip(String reason) {
-    consecutiveSkips++;
-    if (consecutiveSkips == 1) {
-      skippedSince = Instant.ofEpochMilli(clock.getAsLong());
-    }
-    if (consecutiveSkips <= 2) {
-      LOG.debugf("Delivery tick skipped: %s.", reason);
-    } else {
-      LOG.infof(
-          "Delivery tick skipped (%d in a row since %s): %s.",
-          consecutiveSkips, skippedSince, reason);
-    }
-  }
-
-  /** How many ticks in a row have just been skipped; a written tick resets it. For a test. */
-  int consecutiveSkips() {
-    return consecutiveSkips;
   }
 }

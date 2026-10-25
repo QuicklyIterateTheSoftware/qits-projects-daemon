@@ -21,9 +21,9 @@ public record SessionCredentials(List<Credential> credentials) implements Daemon
 
   /**
    * The key of the front desk's own session — the one {@code project.work} session the keeper holds
-   * open, which also runs the project's delivery loop as turns while the loop is on. qits puts the
-   * desk's delivery token ({@code qits:agent} + {@code qits:desk}) under it while the loop is on,
-   * and an ordinary desk-session token otherwise.
+   * open, which also runs the project's delivery passes, when prompted, while the loop is on. qits
+   * puts the desk's delivery token ({@code qits:agent} + {@code qits:desk}) under it while the loop
+   * is on, and an ordinary desk-session token otherwise.
    */
   public static final String FRONT_DESK_KEY = "front-desk";
 

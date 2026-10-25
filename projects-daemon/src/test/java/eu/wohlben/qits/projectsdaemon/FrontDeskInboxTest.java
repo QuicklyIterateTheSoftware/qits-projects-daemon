@@ -22,8 +22,7 @@ import org.junit.jupiter.api.Test;
 /**
  * The front desk's inbox (qits-1572): a turn typed at once into an idle desk, queued behind a busy
  * one and flushed one per {@code IDLE}, held for a draft, refused without a desk or past capacity;
- * the delivery tick standing aside while turns are pending; and the last answer read out of a raw
- * transcript. Activity comes from a real {@link HookWebhook}, wired as {@link
+ * and the last answer read out of a raw transcript. Activity comes from a real {@link HookWebhook}, wired as {@link
  * ControlSocket#wireAgents} wires it.
  */
 class FrontDeskInboxTest {
@@ -219,55 +218,6 @@ class FrontDeskInboxTest {
 
     hooks.handle("Stop", new JsonObject(), "cmd-a-persons-session");
     assertTrue(session.typed.isEmpty());
-  }
-
-  // --- beside the delivery tick ---------------------------------------------------------------
-
-  @Test
-  void theDeliveryTickIsSkippedWhileTheInboxIsPending() {
-    List<Runnable> ticks = new ArrayList<>();
-    FrontDeskKeeper.Scheduler manual =
-        new FrontDeskKeeper.Scheduler() {
-          @Override
-          public void schedule(Runnable step, long delayMs) {
-            ticks.add(step);
-          }
-
-          @Override
-          public void shutdown() {}
-        };
-    DeliveryKeeper.Settings settings =
-        DeliveryKeeper.Settings.parse(
-            Optional.of("on"), Optional.of("PT10M"), Optional.of("token"), Optional.empty());
-    DeliveryKeeper tick =
-        new DeliveryKeeper(
-            settings, settings::runnable, () -> kept, session, manual, () -> now, inbox);
-    tick.start();
-    hook("SessionStart");
-    hook("UserPromptSubmit");
-    inbox.prompt("queued");
-    hook("Stop");
-    assertEquals(List.of("queued"), session.typed);
-
-    // The queued turn is typed but has not started: the tick stands aside.
-    runTick(ticks);
-    assertEquals(1, session.typed.size(), "no tick typed into a pending inbox turn");
-    assertEquals(1, tick.consecutiveSkips());
-
-    hook("UserPromptSubmit");
-    hook("Stop");
-    runTick(ticks);
-    assertEquals(2, session.typed.size(), "the inbox is drained: the tick runs");
-    assertTrue(session.typed.get(1).startsWith("Run one pass of the delivery loop"));
-    assertEquals(0, tick.consecutiveSkips());
-
-    // And a tick typed counts as pending for the inbox until it starts.
-    assertEquals(Kind.QUEUED, inbox.prompt("after the tick").kind());
-  }
-
-  /** Run the one scheduled tick; it schedules the next. The clock stays inside the grace. */
-  private static void runTick(List<Runnable> ticks) {
-    ticks.removeFirst().run();
   }
 
   // --- the last answer ------------------------------------------------------------------------

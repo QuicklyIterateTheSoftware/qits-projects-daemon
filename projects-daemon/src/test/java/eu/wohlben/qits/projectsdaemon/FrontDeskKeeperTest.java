@@ -272,7 +272,6 @@ class FrontDeskKeeperTest {
         new FrontDeskCredential(
             DeliveryKeeper.Settings.parse(
                 Optional.of("on"),
-                Optional.empty(),
                 Optional.of(TOKEN),
                 Optional.of("desk-delivery:p-1")),
             SessionCredentialStore.withoutOwnToken()),
@@ -317,15 +316,13 @@ class FrontDeskKeeperTest {
     assertFalse(FrontDeskCredential.SCRUBBED.delivering());
     FrontDeskCredential noToken =
         new FrontDeskCredential(
-            DeliveryKeeper.Settings.parse(
-                Optional.of("on"), Optional.empty(), Optional.of(" "), Optional.empty()),
+            DeliveryKeeper.Settings.parse(Optional.of("on"), Optional.of(" "), Optional.empty()),
             SessionCredentialStore.withoutOwnToken());
     assertFalse(noToken.delivering());
     assertEquals(DaemonSecrets.SCRUB, noToken.launchOverlay(), "no token, no rights");
     FrontDeskCredential noSubject =
         new FrontDeskCredential(
-            DeliveryKeeper.Settings.parse(
-                Optional.of("on"), Optional.empty(), Optional.of(TOKEN), Optional.empty()),
+            DeliveryKeeper.Settings.parse(Optional.of("on"), Optional.of(TOKEN), Optional.empty()),
             SessionCredentialStore.withoutOwnToken());
     assertTrue(noSubject.delivering());
     assertEquals(
@@ -355,7 +352,6 @@ class FrontDeskKeeperTest {
         new FrontDeskCredential(
             DeliveryKeeper.Settings.parse(
                 Optional.ofNullable(delivery),
-                Optional.empty(),
                 Optional.ofNullable(token),
                 Optional.of("desk-delivery:p-1")),
             credentials),

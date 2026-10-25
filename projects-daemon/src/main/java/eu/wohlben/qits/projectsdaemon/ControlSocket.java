@@ -252,22 +252,19 @@ public class ControlSocket {
   Optional<String> lifecycle;
 
   /**
-   * Whether this container's front desk runs the delivery loop ({@code
+   * Whether this container's front desk holds the delivery rights ({@code
    * QITS_PROJECTS_DAEMON_DELIVERY}): {@code on} or {@code off}, the default. On with a token, the
-   * front desk is kept whatever {@link #lifecycle} says, launched with the delivery token, and
-   * ticked. See {@link DeliveryKeeper} and {@link FrontDeskCredential}.
+   * front desk is kept whatever {@link #lifecycle} says and launched with the delivery token; it
+   * runs a delivery pass only when a person prompts it (qits-1597). See {@link DeliveryKeeper} and
+   * {@link FrontDeskCredential}.
    */
   @ConfigProperty(name = "qits.projects-daemon.delivery")
   Optional<String> delivery;
 
-  /** How often the front desk is ticked ({@code …_DELIVERY_INTERVAL}), ISO-8601; PT10M. */
-  @ConfigProperty(name = "qits.projects-daemon.delivery-interval")
-  Optional<String> deliveryInterval;
-
   /**
    * The desk's delivery token ({@code QITS_DELIVERY_TOKEN}), handed to the keeper's front desk
    * session as its {@code QITS_TOKEN} ({@link FrontDeskCredential}) and to no other child ({@link
-   * DaemonSecrets}). Unset means no delivery loop, whatever {@link #delivery} says.
+   * DaemonSecrets}). Unset means no delivery rights, whatever {@link #delivery} says.
    */
   @ConfigProperty(name = "qits.projects-daemon.delivery-token")
   Optional<String> deliveryToken;
@@ -393,14 +390,9 @@ public class ControlSocket {
   volatile FrontDeskKeeper frontDesk;
 
   /**
-   * The delivery tick {@link #wireAgents} built over {@link #frontDesk}'s own session, started with
-   * it by {@link #keepFrontDesk()}. Null when the agent surface stayed unwired.
-   */
-  volatile DeliveryKeeper deliveryTick;
-
-  /**
-   * The front desk's inbox {@link #wireAgents} built beside {@link #deliveryTick}: the turns {@code
-   * POST /front-desk/prompt} types or queues. Null when the agent surface stayed unwired.
+   * The front desk's inbox {@link #wireAgents} built over {@link #frontDesk}'s own session: the
+   * turns {@code POST /front-desk/prompt} types or queues. Null when the agent surface stayed
+   * unwired.
    */
   volatile FrontDeskInbox frontDeskInbox;
 
@@ -542,8 +534,7 @@ public class ControlSocket {
           // After the API is wired, never before: the loopback surface must not wait on a
           // subprocess, and a container whose clone failed has no checkout to hold.
           followCheckout();
-          // Last: a desk needs both the checkout and the wired agent surface. The delivery tick
-          // starts beside it.
+          // Last: a desk needs both the checkout and the wired agent surface.
           keepFrontDesk();
         });
   }
@@ -587,10 +578,10 @@ public class ControlSocket {
   }
 
   /**
-   * Start the {@link FrontDeskKeeper} and the {@link DeliveryKeeper} tick — but only when the boot
-   * provision produced a checkout and {@link #wireAgents} wired a launch service. The keeper is a
-   * no-op unless the lifecycle is {@code ALWAYS_ON} or delivery is {@code on} with a token; the tick
-   * unless the latter. Never throws, for the same reason {@link #followCheckout()} does not.
+   * Start the {@link FrontDeskKeeper} — but only when the boot provision produced a checkout and
+   * {@link #wireAgents} wired a launch service. The keeper is a no-op unless the lifecycle is {@code
+   * ALWAYS_ON} or delivery is {@code on} with a token. Never throws, for the same reason {@link
+   * #followCheckout()} does not.
    */
   void keepFrontDesk() {
     if (!provisioned) {
@@ -602,14 +593,6 @@ public class ControlSocket {
         keeper.start();
       } catch (RuntimeException e) {
         LOG.warnf("The front desk keeper did not start: %s", e.getMessage());
-      }
-    }
-    DeliveryKeeper ticking = deliveryTick;
-    if (ticking != null) {
-      try {
-        ticking.start();
-      } catch (RuntimeException e) {
-        LOG.warnf("The delivery tick did not start: %s", e.getMessage());
       }
     }
   }
@@ -740,8 +723,7 @@ public class ControlSocket {
             System.getenv("CLAUDE_CONFIG_DIR"),
             Path.of(System.getProperty("java.io.tmpdir")));
     DeliveryKeeper.Settings deliverySettings =
-        DeliveryKeeper.Settings.parse(
-            delivery, deliveryInterval, deliveryToken, deliveryTokenSubject);
+        DeliveryKeeper.Settings.parse(delivery, deliveryToken, deliveryTokenSubject);
     FrontDeskCredential frontDeskCredential =
         new FrontDeskCredential(deliverySettings, sessionCredentials);
     FrontDeskKeeper keeper =
@@ -763,8 +745,8 @@ public class ControlSocket {
               HookWebhook webhook = hooks;
               return webhook == null ? Optional.empty() : webhook.lastState(commandId);
             });
-    // Turns qits types into the desk (qits-1572). It shares one lock with the tick below, and hears
-    // the webhook's activity to flush its queue on IDLE.
+    // Turns qits types into the desk (qits-1572) — the only writer into it now that nothing types
+    // on a schedule (qits-1597). It hears the webhook's activity to flush its queue on IDLE.
     FrontDeskInbox inbox =
         new FrontDeskInbox(
             keeper::keptCommandId,
@@ -779,15 +761,6 @@ public class ControlSocket {
     if (h != null) {
       h.setActivityListener(inbox::onActivity);
     }
-    deliveryTick =
-        new DeliveryKeeper(
-            deliverySettings,
-            frontDeskCredential::delivering,
-            keeper::keptCommandId,
-            deskSession,
-            FrontDeskKeeper.Scheduler.worker(),
-            System::currentTimeMillis,
-            inbox);
     projectsApi.wireFrontDesk(inbox);
     projectsApi.wireSessions(sessionCredentials);
     projectsApi.wireAgents(
@@ -1170,10 +1143,6 @@ public class ControlSocket {
     FrontDeskKeeper keeper = frontDesk;
     if (keeper != null) {
       keeper.stop();
-    }
-    DeliveryKeeper ticking = deliveryTick;
-    if (ticking != null) {
-      ticking.stop();
     }
     FrontDeskInbox inbox = frontDeskInbox;
     if (inbox != null) {

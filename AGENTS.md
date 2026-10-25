@@ -48,8 +48,8 @@ library declares:
     FrontDeskCredential     the one seam deciding the front desk launch's credential: the `front-desk` session
                             credential once qits sent any; before that (legacy) the delivery token as
                             QITS_TOKEN while delivering, the container's own token otherwise
-    DeliveryKeeper          the delivery tick: one "Run one pass of the delivery loop" turn per interval,
-                            typed into the keeper's own front desk when idle; writes the loop's brief
+    DeliveryKeeper          the delivery settings, the loop's brief (written at boot) and the front desk
+                            session seam; it types nothing — no turn reaches the desk on a schedule (qits-1597)
     FrontDeskInbox          turns qits types into the keeper's own front desk (POST /front-desk/prompt),
                             queued while it is busy, and its last answer (GET /front-desk/last-answer)
     DaemonSecrets           keeping the daemon's secrets — QITS_DELIVERY_TOKEN(_SUBJECT), the API token,
@@ -78,8 +78,9 @@ Refusals carry `{"reason"}` (plus this server's usual `message`). `FrontDeskInbo
 state is exactly `IDLE`, nothing is queued, no inbox-typed turn is still waiting for its
 `UserPromptSubmit` (30 s grace) and no draft holds it; otherwise it joins a FIFO of 16. Every `IDLE`
 activity of the kept command (`HookWebhook.setActivityListener`) flushes exactly one queued turn; a
-draft keeps it at the head. The inbox and `DeliveryKeeper` share one lock, so their keystrokes never
-interleave, and the tick is skipped with reason `inbox` while turns are pending. The last answer is
+draft keeps it at the head. The inbox is the only writer the daemon has into the desk — nothing types
+turns on a schedule (qits-1597) — and every inbox write holds one lock, so keystrokes never interleave.
+The last answer is
 the `text` blocks of the main-chain assistant entries after the last real user prompt on the
 TRANSCRIPT channel — `tool_result` user entries, meta and sidechain entries are not prompts, and
 `tool_use`/`thinking` blocks are never part of it.
@@ -418,19 +419,17 @@ derive fails at the boundary instead of far from it.
                                          session while its transcript exists; not signed in ⇒ a DaemonLog WARN and
                                          a retry every 5 min, never a sign-in terminal
     QITS_PROJECTS_DAEMON_DELIVERY        on | off (default; anything else ⇒ one WARN, off). on AND a delivery token ⇒
-                                         the front desk runs the delivery loop: ONE session, no separate
+                                         the front desk holds the delivery rights: ONE session, no separate
                                          project.delivery one (owner ruling, 2026-10-22). The keeper keeps the
                                          front desk whatever the lifecycle, launches it with the delivery token,
                                          tracks the command it launched and counts only THAT one as live — a
                                          project.work session a person started from the desk panel neither
-                                         stops it launching its own nor ever gets a tick. Off ⇒ one INFO, and
-                                         the keeper behaves exactly as the lifecycle alone says (deferring to any
-                                         live project.work session)
-    QITS_PROJECTS_DAEMON_DELIVERY_INTERVAL  ISO-8601, default PT10M: every interval the keeper's front desk is typed
-                                         "Run one pass of the delivery loop: read /tmp/qits-delivery-brief.md and
-                                         follow it. (tick <instant>)" — only while that command is RUNNING and its
-                                         last hook-reported state is IDLE (no draft); otherwise the tick is
-                                         skipped at DEBUG, never queued
+                                         stops it launching its own nor ever gets the rights. The desk runs a
+                                         delivery pass only when a person prompts it (directly, or through
+                                         POST /front-desk/prompt): nothing types turns into it on a schedule, and
+                                         there is no interval setting (qits-1597). Off ⇒ the keeper behaves
+                                         exactly as the lifecycle alone says (deferring to any live project.work
+                                         session)
     QITS_DELIVERY_TOKEN                  LEGACY MODE ONLY (no sessionCredentials frame): the desk's delivery token
                                          (desk-delivery commission, qits:desk); the keeper's front desk gets it as
                                          its QITS_TOKEN (and so as its qits MCP bearer), decided in one place,
@@ -446,8 +445,9 @@ derive fails at the boundary instead of far from it.
 **The delivery loop's brief is a file** (`/tmp/qits-delivery-brief.md`, 0644), written at boot right after
 the agent configuration document is materialized — the only time that document is read. Its text is the
 `project.delivery` surface's `systemPrompt` from that document; absent or blank ⇒ a short fallback telling
-the session to read its rules with `qits projects delivery --project <projectId>` and do one pass. The
-`project.delivery` surface is only the brief's store: nothing launches it.
+the session to read its rules with `qits projects delivery --project <projectId>` and do one pass. A
+prompted pass reads it; nothing points the desk at it on its own. The `project.delivery` surface is only
+the brief's store: nothing launches it.
 
 ## No child holds the daemon's secrets, and each session runs on its own token (qits-1482)
 
@@ -475,7 +475,7 @@ the full list — `[{key, token, subject}]` — on `hello` and on every change; 
 memory (`SessionCredentialStore`), replaced wholesale per frame. Two keys, plus an entity id per
 refinement session later (qits-770):
 
-    front-desk    the ONE front desk session (FrontDeskKeeper), which runs the delivery loop as turns.
+    front-desk    the ONE front desk session (FrontDeskKeeper), which runs a delivery pass when prompted.
                   qits puts the desk-delivery token (qits:agent + qits:desk) here while the loop is on,
                   a desk-session token (qits:agent) otherwise
     desk-agents   every POST /agents launch — a person's sessions from the desk panel, whatever surface.

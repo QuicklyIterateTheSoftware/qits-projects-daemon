@@ -45,10 +45,10 @@ import org.jboss.logging.Logger;
  *   <li><b>Launch</b> only when no live {@code project.work} session exists. One the SPA started
  *       counts: the desk is the surface, not whoever opened it, and two of them would be two remote
  *       control threads for one desk. <b>Not while delivering:</b> then the desk is the session
- *       that holds the delivery rights and takes the delivery ticks, which a session a person
- *       started from the desk panel never is (it runs on {@code desk-agents}). So the keeper tracks the command it launched
- *       ({@link #keptCommandId()}), counts only that one as live, and launches its own beside
- *       anybody else's.
+ *       that holds the delivery rights, which a session a person started from the desk panel never
+ *       is (it runs on {@code desk-agents}). So the keeper tracks the command it launched ({@link
+ *       #keptCommandId()}), counts only that one as live, and launches its own beside anybody
+ *       else's.
  *   <li><b>Supervise:</b> when the keeper's session exits, it is relaunched after a backoff that
  *       starts at 5 s and doubles to 5 min, and resets once a session stayed up for 10 min. It never
  *       gives up: a desk that stops coming back is the failure this class exists to remove.
@@ -81,8 +81,9 @@ import org.jboss.logging.Logger;
  *
  * <p>The launch's credential is {@link FrontDeskCredential}'s to decide, asked before every launch:
  * the {@code front-desk} session credential once qits sent credentials; before that, the delivery
- * token while delivering and the container's own token otherwise. The delivery loop itself is {@link
- * DeliveryKeeper}'s tick, typed into {@link #keptCommandId()}.
+ * token while delivering and the container's own token otherwise. Nothing types the delivery loop
+ * into {@link #keptCommandId()} on a schedule (qits-1597): a pass runs when a person prompts the
+ * desk, directly or through {@link FrontDeskInbox}.
  */
 final class FrontDeskKeeper {
 
@@ -251,7 +252,7 @@ final class FrontDeskKeeper {
   private volatile boolean started;
   private volatile boolean stopped;
 
-  // Written only on the scheduler's single thread; volatile because the delivery tick reads it.
+  // Written only on the scheduler's single thread; volatile because the front desk inbox reads it.
   private volatile String commandId;
 
   // Touched only on the scheduler's single thread (and start(), before the first step runs).
@@ -310,7 +311,7 @@ final class FrontDeskKeeper {
     started = true;
     if (delivering) {
       LOG.infof(
-          "Keeping the %s %s running with the desk's delivery rights; it runs the delivery loop.",
+          "Keeping the %s %s running with the desk's delivery rights; it delivers when prompted.",
           SURFACE.key(), LABEL);
     } else {
       LOG.infof("Keeping the %s %s running.", SURFACE.key(), LABEL);
@@ -319,8 +320,8 @@ final class FrontDeskKeeper {
   }
 
   /**
-   * The command the keeper launched, while it is the one being kept — what the delivery tick types
-   * into. Empty before the first launch and between an exit and the relaunch. It names the
+   * The command the keeper launched, while it is the one being kept — what {@link FrontDeskInbox}
+   * types into. Empty before the first launch and between an exit and the relaunch. It names the
    * keeper's own session only, never one a person started: a person's session holds no delivery
    * token.
    */

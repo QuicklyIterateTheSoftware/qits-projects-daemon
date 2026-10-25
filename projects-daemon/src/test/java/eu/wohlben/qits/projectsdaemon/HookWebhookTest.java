@@ -64,7 +64,7 @@ class HookWebhookTest {
     assertEquals(AgentState.ENDED, lastSent().state());
   }
 
-  /** What DeliveryKeeper's tick reads: the stored state, WAITING surviving a Stop, gone at end. */
+  /** What FrontDeskInbox reads: the stored state, WAITING surviving a Stop, gone at end. */
   @Test
   void lastStateIsTheStoredState() {
     assertEquals(java.util.Optional.empty(), webhook.lastState("cmd-1"));

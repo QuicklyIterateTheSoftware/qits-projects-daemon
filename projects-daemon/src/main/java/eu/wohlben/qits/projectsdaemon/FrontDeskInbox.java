@@ -19,9 +19,9 @@ import org.jboss.logging.Logger;
  * Turns typed into the front desk on qits' behalf (qits-1572): {@code POST /front-desk/prompt}
  * lands here, and {@code GET /front-desk/last-answer} reads the desk's answer back.
  *
- * <p><b>Only the keeper's own session.</b> Like {@link DeliveryKeeper}'s tick, a prompt goes to
- * {@link FrontDeskKeeper#keptCommandId()} and never to a {@code project.work} session a person
- * started. No kept command running: {@link Kind#NO_DESK}.
+ * <p><b>Only the keeper's own session.</b> A prompt goes to {@link
+ * FrontDeskKeeper#keptCommandId()} — the session that holds the delivery rights — and never to a
+ * {@code project.work} session a person started. No kept command running: {@link Kind#NO_DESK}.
  *
  * <p><b>Typed now, or queued.</b> A prompt is typed at once when the desk is RUNNING, its last hook
  * state is exactly {@code IDLE}, nothing is queued ahead of it, no turn the inbox typed is still
@@ -37,11 +37,10 @@ import org.jboss.logging.Logger;
  * IDLE} activity arrives, or {@link #START_GRACE_MS} pass (a hook that never comes must not wedge
  * the desk).
  *
- * <p><b>One writer at a time.</b> The inbox and the delivery tick never interleave keystrokes:
- * {@link DeliveryKeeper} runs its whole check-and-type under {@link #exclusive}, the same monitor
- * every inbox write holds, and skips its tick (reason {@code inbox}) while {@link #pending()}.
+ * <p><b>The only writer the daemon has.</b> Nothing else types into the desk on a schedule
+ * (qits-1597): every inbox write holds one monitor, so two prompts never interleave keystrokes.
  */
-final class FrontDeskInbox implements DeliveryKeeper.Inbox {
+final class FrontDeskInbox {
 
   private static final Logger LOG = Logger.getLogger(FrontDeskInbox.class);
 
@@ -91,7 +90,7 @@ final class FrontDeskInbox implements DeliveryKeeper.Inbox {
 
   /**
    * @param frontDesk the keeper's own command ({@link FrontDeskKeeper#keptCommandId()})
-   * @param session the same seam {@link DeliveryKeeper} types through
+   * @param session the seam the inbox types through ({@link DeliveryKeeper.Session})
    * @param transcript the raw TRANSCRIPT channel lines of a command, oldest first
    * @param scheduler where a flush runs, off the hook webhook's event loop
    */
@@ -186,24 +185,10 @@ final class FrontDeskInbox implements DeliveryKeeper.Inbox {
     }
   }
 
-  @Override
-  public boolean pending() {
+  /** Whether turns wait: queued, or typed and not yet started. For a test. */
+  boolean pending() {
     synchronized (lock) {
       return !queue.isEmpty() || awaitingStart();
-    }
-  }
-
-  @Override
-  public void typed() {
-    synchronized (lock) {
-      typedAt = clock.getAsLong();
-    }
-  }
-
-  @Override
-  public <T> T exclusive(Supplier<T> action) {
-    synchronized (lock) {
-      return action.get();
     }
   }
 

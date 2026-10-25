@@ -41,8 +41,8 @@ import org.jboss.logging.Logger;
  * about a minute after a turn ends while the session sits untouched — {@code notification_type}
  * {@code idle_prompt}, {@code message} "Claude is waiting for your input" — and reading that as
  * {@code WAITING} parked every finished session there until its next prompt, which is exactly the
- * state {@link DeliveryKeeper}'s tick refuses to type into: the front desk got one delivery pass
- * and then none. So an idle prompt maps to {@code IDLE} (see {@link #isIdlePrompt}); a {@code
+ * state {@link FrontDeskInbox} refuses to type into: a turn for the front desk would queue behind
+ * a prompt nobody has to answer. So an idle prompt maps to {@code IDLE} (see {@link #isIdlePrompt}); a {@code
  * permission_prompt}, and any notification this daemon does not recognise, stays {@code WAITING} —
  * an unknown one might still be a prompt somebody has to answer. An idle prompt never downgrades a
  * stored {@code WAITING}, by the same rule as {@code Stop}: since idle prompts no longer store
@@ -207,8 +207,8 @@ final class HookWebhook {
   }
 
   /**
-   * The last state stored for {@code commandId} — what {@link DeliveryKeeper}'s tick reads to tell
-   * an idle front desk from a busy one. Empty when nothing was heard yet or the session ended.
+   * The last state stored for {@code commandId} — what {@link FrontDeskInbox} reads to tell an
+   * idle front desk from a busy one. Empty when nothing was heard yet or the session ended.
    */
   Optional<String> lastState(String commandId) {
     AgentActivity activity = commandId == null ? null : lastByCommand.get(commandId);
