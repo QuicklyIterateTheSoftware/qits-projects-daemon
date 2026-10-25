@@ -28,8 +28,13 @@ public final class DaemonProtocol {
    * <p>2 understands {@link SessionCredentials} (qits-1482): the backend sends that frame only to a
    * daemon announcing 2 or later, and a daemon that never receives one keeps launching on its own
    * token, exactly as 1 did.
+   *
+   * <p>3 runs the session multiplex (epic qits-770): it understands {@link Sessions} — the desired
+   * list of sessions, one per key — and answers with {@link SessionReport}. The backend sends {@link
+   * Sessions} only to a daemon announcing 3 or later; until one arrives a daemon keeps the front desk
+   * by its lifecycle setting and reports nothing, exactly as 2 did.
    */
-  public static final int CAPABILITY_VERSION = 2;
+  public static final int CAPABILITY_VERSION = 3;
 
   /**
    * The fixed {@code correlationId} the daemon tags its autonomous self-provision output ({@link
@@ -69,12 +74,14 @@ public final class DaemonProtocol {
     public static final String PROVISION_FAILED = "provisionFailed";
     public static final String AGENT_ACTIVITY = "agentActivity";
     public static final String PROJECT_CHANGED = "projectChanged";
+    public static final String SESSION_REPORT = "sessionReport";
     // qits -> projects-daemon
     public static final String ACK = "ack";
     public static final String RUN_COMMAND = "runCommand";
     public static final String DESCRIBE = "describe";
     public static final String OPEN_STREAM = "openStream";
     public static final String SESSION_CREDENTIALS = "sessionCredentials";
+    public static final String SESSIONS = "sessions";
 
     private Type() {}
   }
@@ -112,6 +119,16 @@ public final class DaemonProtocol {
     public static final String KEY = "key";
     public static final String TOKEN = "token";
     public static final String SUBJECT = "subject";
+    public static final String SESSIONS = "sessions";
+    public static final String SURFACE = "surface";
+    public static final String RESUME_SESSION_ID = "resumeSessionId";
+    public static final String ENTITY = "entity";
+    public static final String QUALIFIED_ID = "qualifiedId";
+    public static final String TITLE = "title";
+    public static final String STATUS = "status";
+    public static final String BLOCKED = "blocked";
+    public static final String BLOCK_SOURCE = "blockSource";
+    public static final String DETAIL = "detail";
 
     private Field() {}
   }
@@ -135,5 +152,36 @@ public final class DaemonProtocol {
     public static final String ENDED = "ENDED";
 
     private AgentState() {}
+  }
+
+  /**
+   * The {@code state} a {@link Sessions.Session} asks for. Plain Strings for the same reason {@link
+   * AgentState} is; the backend's own enum mirrors them by name.
+   */
+  public static final class DesiredState {
+    /** Keep the key's session running: launch it when missing, relaunch it when it exits. */
+    public static final String RUNNING = "RUNNING";
+
+    /** Keep nothing for the key: terminate its session (SIGTERM) and forget its entity. */
+    public static final String STOPPED = "STOPPED";
+
+    private DesiredState() {}
+  }
+
+  /** The {@code state} a {@link SessionReport.Session} carries; see that record for each word. */
+  public static final class ReportedState {
+    /** Wanted, not running yet: waiting, or between an exit and its relaunch. */
+    public static final String STARTING = "STARTING";
+
+    /** The key's session is up. */
+    public static final String RUNNING = "RUNNING";
+
+    /** Not wanted, and nothing of it is running. */
+    public static final String STOPPED = "STOPPED";
+
+    /** Wanted, and its last launch was refused; retried on the ladder. */
+    public static final String FAILED = "FAILED";
+
+    private ReportedState() {}
   }
 }

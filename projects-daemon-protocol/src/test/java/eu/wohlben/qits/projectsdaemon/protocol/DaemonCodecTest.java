@@ -1,7 +1,9 @@
 package eu.wohlben.qits.projectsdaemon.protocol;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -225,11 +227,141 @@ class DaemonCodecTest {
   }
 
   @Test
-  void capabilityTwoIsTheOneThatUnderstandsSessionCredentials() {
-    assertEquals(2, DaemonProtocol.CAPABILITY_VERSION);
+  void sessionCredentialsAreUnderstoodFromCapabilityTwoOn() {
+    assertTrue(DaemonProtocol.CAPABILITY_VERSION >= 2);
     assertEquals("sessionCredentials", DaemonProtocol.Type.SESSION_CREDENTIALS);
     assertEquals("front-desk", SessionCredentials.FRONT_DESK_KEY);
     assertEquals("desk-agents", SessionCredentials.DESK_AGENTS_KEY);
+  }
+
+  // --- the session multiplex (capability 3, epic qits-770) -------------------------------------
+
+  private static final String ENTITY_KEY = "0b7c4e1a-5d1f-4c3e-9a77-2f0e8c1d4b6a";
+
+  @Test
+  void capabilityThreeIsTheOneThatRunsTheMultiplex() {
+    // Literals, not the constants: these words are what qits-projects-service implements against.
+    assertEquals(3, DaemonProtocol.CAPABILITY_VERSION);
+    assertEquals("sessions", DaemonProtocol.Type.SESSIONS);
+    assertEquals("sessionReport", DaemonProtocol.Type.SESSION_REPORT);
+    assertEquals("RUNNING", DaemonProtocol.DesiredState.RUNNING);
+    assertEquals("STOPPED", DaemonProtocol.DesiredState.STOPPED);
+    assertEquals("STARTING", DaemonProtocol.ReportedState.STARTING);
+    assertEquals("RUNNING", DaemonProtocol.ReportedState.RUNNING);
+    assertEquals("STOPPED", DaemonProtocol.ReportedState.STOPPED);
+    assertEquals("FAILED", DaemonProtocol.ReportedState.FAILED);
+  }
+
+  @Test
+  void sessionsRoundTripWithTheirWireShape() {
+    Sessions frame =
+        new Sessions(
+            List.of(
+                new Sessions.Session(
+                    SessionCredentials.FRONT_DESK_KEY, "project.work", "RUNNING", null, null),
+                new Sessions.Session(
+                    ENTITY_KEY,
+                    "epic.chat",
+                    "RUNNING",
+                    "11111111-1111-1111-1111-111111111111",
+                    new Sessions.Entity(
+                        "qits-1234", "Refine the desk", "REPORTED", true, "AGENT_WAITING")),
+                new Sessions.Session("other-entity", "epic.chat", "STOPPED", null, null)));
+    assertEquals(frame, roundTrip(frame));
+
+    Map<String, Object> wire = DaemonCodec.encode(frame);
+    assertEquals("sessions", wire.get("type"));
+    Map<String, Object> frontDesk = new LinkedHashMap<>();
+    frontDesk.put("key", "front-desk");
+    frontDesk.put("surface", "project.work");
+    frontDesk.put("state", "RUNNING");
+    frontDesk.put("resumeSessionId", null);
+    frontDesk.put("entity", null);
+    Map<String, Object> entity = new LinkedHashMap<>();
+    entity.put("qualifiedId", "qits-1234");
+    entity.put("title", "Refine the desk");
+    entity.put("status", "REPORTED");
+    entity.put("blocked", true);
+    entity.put("blockSource", "AGENT_WAITING");
+    Map<String, Object> refinement = new LinkedHashMap<>();
+    refinement.put("key", ENTITY_KEY);
+    refinement.put("surface", "epic.chat");
+    refinement.put("state", "RUNNING");
+    refinement.put("resumeSessionId", "11111111-1111-1111-1111-111111111111");
+    refinement.put("entity", entity);
+    @SuppressWarnings("unchecked")
+    List<Map<String, Object>> sessions = (List<Map<String, Object>>) wire.get("sessions");
+    assertEquals(frontDesk, sessions.get(0));
+    assertEquals(refinement, sessions.get(1));
+    assertEquals(3, sessions.size());
+  }
+
+  @Test
+  void anUnknownDesiredStateReadsAsStopped() {
+    // A word this daemon does not know must not start a session.
+    Map<String, Object> wire = new LinkedHashMap<>();
+    wire.put("type", "sessions");
+    wire.put("sessions", List.of(Map.of("key", ENTITY_KEY, "state", "PAUSED"), Map.of("key", "k")));
+    Sessions decoded = (Sessions) DaemonCodec.decode(wire);
+    assertEquals("STOPPED", decoded.sessions().get(0).state());
+    assertEquals("STOPPED", decoded.sessions().get(1).state(), "absent is stopped too");
+    assertFalse(decoded.sessions().get(0).running());
+  }
+
+  @Test
+  void sessionsSkipMalformedEntriesAndToleratesAMissingList() {
+    Map<String, Object> wire = new LinkedHashMap<>();
+    wire.put("type", "sessions");
+    Map<String, Object> keyless = new LinkedHashMap<>();
+    keyless.put("state", "RUNNING");
+    wire.put(
+        "sessions",
+        List.of(
+            keyless,
+            "not an object",
+            Map.of("key", ENTITY_KEY, "state", "RUNNING", "entity", "not an object")));
+    assertEquals(
+        new Sessions(List.of(new Sessions.Session(ENTITY_KEY, null, "RUNNING", null, null))),
+        DaemonCodec.decode(wire));
+    assertEquals(new Sessions(List.of()), DaemonCodec.decode(Map.of("type", "sessions")));
+  }
+
+  @Test
+  void sessionReportRoundTripsWithItsWireShape() {
+    SessionReport report =
+        new SessionReport(
+            List.of(
+                new SessionReport.Session(
+                    "front-desk", "RUNNING", "cmd-1", "11111111-1111-1111-1111-111111111111", null),
+                new SessionReport.Session(
+                    ENTITY_KEY,
+                    "FAILED",
+                    null,
+                    null,
+                    "epic.chat session qits-1234 not launched: no session credential")));
+    assertEquals(report, roundTrip(report));
+
+    Map<String, Object> wire = DaemonCodec.encode(report);
+    assertEquals("sessionReport", wire.get("type"));
+    Map<String, Object> frontDesk = new LinkedHashMap<>();
+    frontDesk.put("key", "front-desk");
+    frontDesk.put("state", "RUNNING");
+    frontDesk.put("commandId", "cmd-1");
+    frontDesk.put("sessionId", "11111111-1111-1111-1111-111111111111");
+    frontDesk.put("detail", null);
+    @SuppressWarnings("unchecked")
+    List<Map<String, Object>> sessions = (List<Map<String, Object>>) wire.get("sessions");
+    assertEquals(frontDesk, sessions.get(0));
+    assertEquals(2, sessions.size());
+  }
+
+  @Test
+  void anEmptySessionReportRoundTripsAndSkipsStatelessEntries() {
+    assertEquals(new SessionReport(List.of()), roundTrip(new SessionReport(List.of())));
+    Map<String, Object> wire = new LinkedHashMap<>();
+    wire.put("type", "sessionReport");
+    wire.put("sessions", List.of(Map.of("key", "front-desk"), Map.of("state", "RUNNING")));
+    assertEquals(new SessionReport(List.of()), DaemonCodec.decode(wire));
   }
 
   @Test

@@ -115,6 +115,34 @@ public final class DaemonCodec {
         }
         map.put(Field.CREDENTIALS, credentials);
       }
+      case Sessions m -> {
+        map.put(Field.TYPE, Type.SESSIONS);
+        List<Map<String, Object>> sessions = new ArrayList<>(m.sessions().size());
+        for (Sessions.Session session : m.sessions()) {
+          Map<String, Object> entry = new LinkedHashMap<>();
+          entry.put(Field.KEY, session.key());
+          entry.put(Field.SURFACE, session.surface());
+          entry.put(Field.STATE, session.state());
+          entry.put(Field.RESUME_SESSION_ID, session.resumeSessionId());
+          entry.put(Field.ENTITY, session.entity() == null ? null : entity(session.entity()));
+          sessions.add(entry);
+        }
+        map.put(Field.SESSIONS, sessions);
+      }
+      case SessionReport m -> {
+        map.put(Field.TYPE, Type.SESSION_REPORT);
+        List<Map<String, Object>> sessions = new ArrayList<>(m.sessions().size());
+        for (SessionReport.Session session : m.sessions()) {
+          Map<String, Object> entry = new LinkedHashMap<>();
+          entry.put(Field.KEY, session.key());
+          entry.put(Field.STATE, session.state());
+          entry.put(Field.COMMAND_ID, session.commandId());
+          entry.put(Field.SESSION_ID, session.sessionId());
+          entry.put(Field.DETAIL, session.detail());
+          sessions.add(entry);
+        }
+        map.put(Field.SESSIONS, sessions);
+      }
     }
     return map;
   }
@@ -172,6 +200,8 @@ public final class DaemonCodec {
       case Type.DESCRIBE -> new Describe(str(map, Field.CORRELATION_ID));
       case Type.OPEN_STREAM -> new OpenStream(str(map, Field.NONCE), str(map, Field.PATH));
       case Type.SESSION_CREDENTIALS -> new SessionCredentials(credentials(map, Field.CREDENTIALS));
+      case Type.SESSIONS -> new Sessions(sessions(map, Field.SESSIONS));
+      case Type.SESSION_REPORT -> new SessionReport(reported(map, Field.SESSIONS));
       default -> throw new IllegalArgumentException("unknown projects-daemon message type: " + type);
     };
   }
@@ -236,6 +266,85 @@ public final class DaemonCodec {
               token == null ? null : token.toString(),
               subject == null ? null : subject.toString()));
     }
+    return out;
+  }
+
+  private static Map<String, Object> entity(Sessions.Entity entity) {
+    Map<String, Object> map = new LinkedHashMap<>();
+    map.put(Field.QUALIFIED_ID, entity.qualifiedId());
+    map.put(Field.TITLE, entity.title());
+    map.put(Field.STATUS, entity.status());
+    map.put(Field.BLOCKED, entity.blocked());
+    map.put(Field.BLOCK_SOURCE, entity.blockSource());
+    return map;
+  }
+
+  /**
+   * The {@link Sessions} list, as tolerant as {@link #credentials}: an absent or non-list field is
+   * empty, an entry that is not an object or names no key is skipped, and an {@code entity} that is
+   * not an object is none — one malformed entry must not stop the rest of the desk's sessions.
+   */
+  private static List<Sessions.Session> sessions(Map<String, Object> map, String key) {
+    List<Sessions.Session> out = new ArrayList<>();
+    for (Map<String, Object> raw : entries(map, key)) {
+      Sessions.Entity entity = null;
+      if (raw.get(Field.ENTITY) instanceof Map<?, ?> rawEntity) {
+        Map<String, Object> fields = object(rawEntity);
+        entity =
+            new Sessions.Entity(
+                str(fields, Field.QUALIFIED_ID),
+                str(fields, Field.TITLE),
+                str(fields, Field.STATUS),
+                boolVal(fields, Field.BLOCKED),
+                str(fields, Field.BLOCK_SOURCE));
+      }
+      out.add(
+          new Sessions.Session(
+              str(raw, Field.KEY),
+              str(raw, Field.SURFACE),
+              str(raw, Field.STATE),
+              str(raw, Field.RESUME_SESSION_ID),
+              entity));
+    }
+    return out;
+  }
+
+  /** The {@link SessionReport} list; an entry without a key or a state is skipped. */
+  private static List<SessionReport.Session> reported(Map<String, Object> map, String key) {
+    List<SessionReport.Session> out = new ArrayList<>();
+    for (Map<String, Object> raw : entries(map, key)) {
+      if (raw.get(Field.STATE) == null) {
+        continue;
+      }
+      out.add(
+          new SessionReport.Session(
+              str(raw, Field.KEY),
+              str(raw, Field.STATE),
+              str(raw, Field.COMMAND_ID),
+              str(raw, Field.SESSION_ID),
+              str(raw, Field.DETAIL)));
+    }
+    return out;
+  }
+
+  /** The object entries of the list at {@code key} that carry a {@code key} field. */
+  private static List<Map<String, Object>> entries(Map<String, Object> map, String key) {
+    Object value = map.get(key);
+    if (!(value instanceof List<?> list)) {
+      return List.of();
+    }
+    List<Map<String, Object>> out = new ArrayList<>(list.size());
+    for (Object element : list) {
+      if (element instanceof Map<?, ?> raw && raw.get(Field.KEY) != null) {
+        out.add(object(raw));
+      }
+    }
+    return out;
+  }
+
+  private static Map<String, Object> object(Map<?, ?> raw) {
+    Map<String, Object> out = new LinkedHashMap<>();
+    raw.forEach((k, v) -> out.put(String.valueOf(k), v));
     return out;
   }
 

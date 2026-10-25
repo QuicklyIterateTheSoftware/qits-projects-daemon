@@ -20,4 +20,6 @@ public sealed interface DaemonMessage
         RunCommand,
         Describe,
         OpenStream,
-        SessionCredentials {}
+        SessionCredentials,
+        Sessions,
+        SessionReport {}
