@@ -47,7 +47,7 @@
              is refused rather than guessed at. This daemon stopped reading the `desk` field in the
              same cutover (task 56a914b7), so the two belong together — on the older pin a body
              carrying neither key would have been guessed. -->
-        <qits-coding-agents.version>2026.1021.153257</qits-coding-agents.version>
+        <qits-coding-agents.version>2026.1025.182758</qits-coding-agents.version>
 
         <!-- pact-jvm, for the contract tests (ticket qits-1149): the version every provider and
              consumer on the estate uses, so a pact is read the same way on both sides. -->
