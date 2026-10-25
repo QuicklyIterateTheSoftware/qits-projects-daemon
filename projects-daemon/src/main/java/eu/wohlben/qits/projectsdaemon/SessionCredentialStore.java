@@ -213,6 +213,26 @@ final class SessionCredentialStore {
   }
 
   /**
+   * The overlay a launch for {@code key} runs on in per-session mode, and <b>never</b> a legacy one:
+   * without a frame (once the grace window passed) the key has no credential and the launch fails
+   * closed. For the sessions only qits asks for — a refinement's entity key (qits-770) — which
+   * existed before no frame and must never run as the container.
+   *
+   * @throws AwaitingSessionCredentialsException inside the grace window
+   * @throws MissingSessionCredentialException when {@code key} has no credential, legacy included
+   */
+  Map<String, String> perSessionOverlayFor(String key) {
+    if (awaiting()) {
+      throw new AwaitingSessionCredentialsException(key);
+    }
+    Credential credential = byKey.get(key);
+    if (!perSession.get() || credential == null) {
+      throw new MissingSessionCredentialException(key);
+    }
+    return DaemonSecrets.credential(credential.token(), credential.subject());
+  }
+
+  /**
    * The {@code QITS_TOKEN}/{@code QITS_TOKEN_SUBJECT} overlay a launch for {@code key} runs on: its
    * credential in per-session mode, the daemon's own in legacy mode.
    *

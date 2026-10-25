@@ -40,7 +40,7 @@ import org.junit.jupiter.api.io.TempDir;
  */
 class FrontDeskKeeperTest {
 
-  private static final FrontDeskKeeper.Timing TIMING = FrontDeskKeeper.Timing.DEFAULT;
+  private static final SessionKeeper.Timing TIMING = SessionKeeper.Timing.DEFAULT;
 
   // --- the virtual clock and scheduler --------------------------------------------------------
 
@@ -58,8 +58,8 @@ class FrontDeskKeeperTest {
 
   private boolean shutdown;
 
-  private final FrontDeskKeeper.Scheduler scheduler =
-      new FrontDeskKeeper.Scheduler() {
+  private final SessionKeeper.Scheduler scheduler =
+      new SessionKeeper.Scheduler() {
         @Override
         public void schedule(Runnable step, long delayMs) {
           if (!shutdown) {

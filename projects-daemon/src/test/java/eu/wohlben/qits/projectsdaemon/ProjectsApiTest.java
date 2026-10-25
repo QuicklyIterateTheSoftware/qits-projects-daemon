@@ -346,7 +346,7 @@ class ProjectsApiTest {
                     "{\"type\":\"assistant\",\"sessionId\":\"sess-9\","
                         + "\"timestamp\":\"2026-10-24T10:00:00Z\","
                         + "\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}}"),
-            new FrontDeskKeeper.Scheduler() {
+            new SessionKeeper.Scheduler() {
               @Override
               public void schedule(Runnable step, long delayMs) {
                 step.run();

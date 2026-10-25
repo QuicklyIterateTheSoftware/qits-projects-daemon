@@ -8,6 +8,7 @@ import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import java.time.Instant;
 import java.util.List;
+import java.util.function.Function;
 import org.jboss.logging.Logger;
 
 /**
@@ -42,8 +43,22 @@ final class CommandJson {
 
   private CommandJson() {}
 
+  /** Names no command's session key: what a caller without the multiplex passes. */
+  static final Function<String, String> NO_SESSION_KEYS = commandId -> null;
+
   /** One command, in the shape qits-projects' own command DTO reconstructs. */
   static JsonObject command(Command command, String projectId, String repoName) {
+    return command(command, projectId, repoName, NO_SESSION_KEYS);
+  }
+
+  /**
+   * One command, with the session key the daemon launched it for ({@code sessionKey}, qits-770) —
+   * {@code front-desk}, or a refinement's entity id — so the SPA can show a room the sessions of its
+   * entity. Absent for every command no keeper launched: a person's, a declared action, the sign-in
+   * terminal.
+   */
+  static JsonObject command(
+      Command command, String projectId, String repoName, Function<String, String> sessionKeyOf) {
     JsonArray sessions = new JsonArray();
     for (AgentSessionRef session : command.agentSessions()) {
       sessions.add(agentSession(session));
@@ -71,6 +86,7 @@ final class CommandJson {
     // grouping rather than keep a display-string contract alive forever. actionName is a label
     // again, and nothing parses it.
     putIfPresent(body, "agentSurface", command.agentSurface());
+    putIfPresent(body, "sessionKey", sessionKeyOf.apply(command.id()));
     putLaunchRecord(body, command);
     putIfPresent(body, "commitHash", command.commitHash());
     putIfPresent(body, "shortCommitHash", shortCommitHash(command.commitHash()));
@@ -84,11 +100,21 @@ final class CommandJson {
 
   /** {@code GET /commands} — the list, newest first. */
   static JsonObject commands(List<Command> commands, String projectId, String repoName) {
+    return commands(commands, projectId, repoName, NO_SESSION_KEYS);
+  }
+
+  /** {@code GET /commands}, each command with its {@code sessionKey} when a keeper launched it. */
+  static JsonObject commands(
+      List<Command> commands,
+      String projectId,
+      String repoName,
+      Function<String, String> sessionKeyOf) {
     JsonArray entries = new JsonArray();
     for (Command command : commands) {
       // Each row is wrapped in an entry with a single `command` component, so the list can grow
       // per-row metadata later without moving the command body.
-      entries.add(new JsonObject().put("command", command(command, projectId, repoName)));
+      entries.add(
+          new JsonObject().put("command", command(command, projectId, repoName, sessionKeyOf)));
     }
     return new JsonObject().put("entries", entries);
   }

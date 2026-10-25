@@ -53,6 +53,43 @@ class CommandJsonTest {
     assertEquals("abc1234", body.getString("shortCommitHash"));
   }
 
+  /**
+   * The multiplex's key (qits-770): a command a keeper launched names the session key it was
+   * launched for, so the SPA can filter a room's sessions to its entity; any other omits it.
+   */
+  @Test
+  void aKeptCommandNamesItsSessionKeyAndNoOtherDoes() {
+    Command command =
+        Command.running(
+            "cmd-3",
+            CommandKind.TERMINAL,
+            "main",
+            null,
+            null,
+            "Claude Code",
+            "claude",
+            true,
+            "CLAUDE",
+            "epic.chat",
+            Instant.parse("2026-09-09T10:00:00Z"));
+
+    JsonObject kept =
+        CommandJson.command(
+            command,
+            "proj-7",
+            "qits-qits",
+            id -> id.equals("cmd-3") ? "0b7c4e1a-entity" : null);
+    assertEquals("0b7c4e1a-entity", kept.getString("sessionKey"));
+    assertFalse(CommandJson.command(command, "proj-7", "qits-qits").containsKey("sessionKey"));
+    assertEquals(
+        "0b7c4e1a-entity",
+        CommandJson.commands(List.of(command), "proj-7", "qits-qits", id -> "0b7c4e1a-entity")
+            .getJsonArray("entries")
+            .getJsonObject(0)
+            .getJsonObject("command")
+            .getString("sessionKey"));
+  }
+
   @Test
   void aCommandWithNoSurfaceOmitsTheKey() {
     JsonObject body =

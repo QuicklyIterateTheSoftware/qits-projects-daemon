@@ -251,6 +251,12 @@ public class ProjectsApi {
   private volatile SessionCredentialStore sessionCredentials =
       SessionCredentialStore.withoutOwnToken();
 
+  /**
+   * Which session key a command was launched for (qits-770), served as {@code sessionKey} on the
+   * command and session bodies. Names none until {@link #wireSessionKeys}.
+   */
+  private volatile Function<String, String> sessionKeys = CommandJson.NO_SESSION_KEYS;
+
   /** The front desk's inbox; null until wired, in which case its routes answer 503. */
   private volatile FrontDeskInbox frontDeskInbox;
 
@@ -308,6 +314,11 @@ public class ProjectsApi {
   void wireSessions(SessionCredentialStore sessionCredentials) {
     this.sessionCredentials =
         sessionCredentials == null ? SessionCredentialStore.withoutOwnToken() : sessionCredentials;
+  }
+
+  /** Wire the session-key lookup. {@link ControlSocket} calls it beside {@link #wireSessions}. */
+  void wireSessionKeys(Function<String, String> sessionKeys) {
+    this.sessionKeys = sessionKeys == null ? CommandJson.NO_SESSION_KEYS : sessionKeys;
   }
 
   /**
@@ -571,7 +582,7 @@ public class ProjectsApi {
       }
       if (AGENT_SESSIONS_PATH.equals(path)) {
         return method == HttpMethod.GET
-            ? new Reply(200, AgentJson.sessions(agentSessions.sessionTree()))
+            ? new Reply(200, AgentJson.sessions(agentSessions.sessionTree(), sessionKeys))
             : new Reply(405, ProjectsJson.error("Method not allowed"));
       }
       return new Reply(404, ProjectsJson.error("No such endpoint"));
@@ -705,7 +716,10 @@ public class ProjectsApi {
             : new Reply(
                 200,
                 CommandJson.commands(
-                    commands.list(parseStatus(request.getParam("status"))), projectId, repoName));
+                    commands.list(parseStatus(request.getParam("status"))),
+                    projectId,
+                    repoName,
+                    sessionKeys));
       }
       if (COMMAND_ACTIONS_PATH.equals(path) && method == HttpMethod.GET) {
         return new Reply(200, CommandJson.actions(commands.availableActions()));
@@ -716,7 +730,9 @@ public class ProjectsApi {
       return switch (verb) {
         case "" ->
             method == HttpMethod.GET
-                ? new Reply(200, CommandJson.command(commands.get(commandId), projectId, repoName))
+                ? new Reply(
+                    200,
+                    CommandJson.command(commands.get(commandId), projectId, repoName, sessionKeys))
                 : new Reply(405, ProjectsJson.error("Method not allowed"));
         case "log" ->
             method == HttpMethod.GET
@@ -731,7 +747,9 @@ public class ProjectsApi {
         case "terminate" ->
             method == HttpMethod.POST
                 ? new Reply(
-                    200, CommandJson.command(commands.terminate(commandId), projectId, repoName))
+                    200,
+                    CommandJson.command(
+                        commands.terminate(commandId), projectId, repoName, sessionKeys))
                 : new Reply(405, ProjectsJson.error("Method not allowed"));
         default -> new Reply(404, ProjectsJson.error("No such endpoint"));
       };

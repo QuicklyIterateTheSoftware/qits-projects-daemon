@@ -106,8 +106,8 @@ public final class ContractSeams {
                 : GuardedInput.NOT_RUNNING;
           }
         };
-    FrontDeskKeeper.Scheduler never =
-        new FrontDeskKeeper.Scheduler() {
+    SessionKeeper.Scheduler never =
+        new SessionKeeper.Scheduler() {
           @Override
           public void schedule(Runnable step, long delayMs) {}
 

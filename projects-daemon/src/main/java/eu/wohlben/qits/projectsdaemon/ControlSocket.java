@@ -34,6 +34,7 @@ import eu.wohlben.qits.projectsdaemon.protocol.ProvisionFailed;
 import eu.wohlben.qits.projectsdaemon.protocol.Provisioned;
 import eu.wohlben.qits.projectsdaemon.protocol.RunCommand;
 import eu.wohlben.qits.projectsdaemon.protocol.SessionCredentials;
+import eu.wohlben.qits.projectsdaemon.protocol.Sessions;
 import io.vertx.core.Context;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.WebSocket;
@@ -397,6 +398,20 @@ public class ControlSocket {
   volatile FrontDeskInbox frontDeskInbox;
 
   /**
+   * The session multiplex {@link #wireAgents} built over the wired launch service (qits-770): one
+   * ladder per session key of qits' {@link Sessions} frame, the front desk's being {@link
+   * #frontDesk}'s. Started beside the front desk once the provision succeeded. Null when the agent
+   * surface stayed unwired. Package-private for the same reason {@link #provisioned} is.
+   */
+  volatile SessionKeeper sessionKeeper;
+
+  /**
+   * The last {@link Sessions} frame, held for a keeper wired after it arrived — qits sends one right
+   * after {@code hello}, usually before the boot clone (and so the wiring) has finished.
+   */
+  private volatile Sessions lastSessions;
+
+  /**
    * The per-session credentials qits sends over this socket ({@link SessionCredentials},
    * qits-1482), which every agent launch picks its {@code QITS_TOKEN} from. Until the first frame
    * — an older qits sends none — launches run as they did before it (legacy mode).
@@ -578,13 +593,19 @@ public class ControlSocket {
   }
 
   /**
-   * Start the {@link FrontDeskKeeper} — but only when the boot provision produced a checkout and
-   * {@link #wireAgents} wired a launch service. The keeper is a no-op unless the lifecycle is {@code
-   * ALWAYS_ON} or delivery is {@code on} with a token. Never throws, for the same reason {@link
-   * #followCheckout()} does not.
+   * Start the {@link FrontDeskKeeper} and the {@link SessionKeeper} — but only when the boot
+   * provision produced a checkout and {@link #wireAgents} wired a launch service. The front desk
+   * keeper is a no-op unless the lifecycle is {@code ALWAYS_ON}, delivery is {@code on}, or qits'
+   * {@code sessions} frame asks for the desk; the session keeper launches only what that frame asks
+   * for. A failed provision is told to the session keeper, which reports every wanted key as failed.
+   * Never throws, for the same reason {@link #followCheckout()} does not.
    */
   void keepFrontDesk() {
+    SessionKeeper sessions = sessionKeeper;
     if (!provisioned) {
+      if (sessions != null) {
+        sessions.refuse("the boot provision failed: there is no checkout to run a session in");
+      }
       return;
     }
     FrontDeskKeeper keeper = frontDesk;
@@ -593,6 +614,13 @@ public class ControlSocket {
         keeper.start();
       } catch (RuntimeException e) {
         LOG.warnf("The front desk keeper did not start: %s", e.getMessage());
+      }
+    }
+    if (sessions != null) {
+      try {
+        sessions.start();
+      } catch (RuntimeException e) {
+        LOG.warnf("The session keeper did not start: %s", e.getMessage());
       }
     }
   }
@@ -731,11 +759,27 @@ public class ControlSocket {
             FrontDeskKeeper.Lifecycle.parse(lifecycle),
             frontDeskCredential,
             FrontDeskKeeper.Desk.of(launch, store, commandRegistry, claudeMount, preflight),
-            FrontDeskKeeper.Timing.DEFAULT,
-            FrontDeskKeeper.Scheduler.worker(),
+            SessionKeeper.Timing.DEFAULT,
+            SessionKeeper.Scheduler.worker(),
             System::currentTimeMillis,
             this::send);
     frontDesk = keeper;
+    // Every other session key qits asks for (qits-770), on a worker of its own; the front desk's
+    // ladder stays on the keeper's.
+    SessionKeeper multiplex =
+        new SessionKeeper(
+            keeper,
+            sessionCredentials,
+            SessionKeeper.Desk.of(launch, store, commandRegistry, claudeMount, preflight),
+            SessionKeeper.Timing.DEFAULT,
+            SessionKeeper.Scheduler.worker("projects-daemon-sessions"),
+            System::currentTimeMillis,
+            this::send);
+    sessionKeeper = multiplex;
+    Sessions held = lastSessions;
+    if (held != null) {
+      multiplex.apply(held);
+    }
     DeliveryKeeper.Session deskSession =
         DeliveryKeeper.Session.of(
             store,
@@ -755,7 +799,7 @@ public class ControlSocket {
                 logs.log(commandId, null, LogChannel.TRANSCRIPT).stream()
                     .map(CommandLogLine::content)
                     .toList(),
-            FrontDeskKeeper.Scheduler.worker(),
+            SessionKeeper.Scheduler.worker(),
             System::currentTimeMillis);
     frontDeskInbox = inbox;
     if (h != null) {
@@ -763,6 +807,7 @@ public class ControlSocket {
     }
     projectsApi.wireFrontDesk(inbox);
     projectsApi.wireSessions(sessionCredentials);
+    projectsApi.wireSessionKeys(multiplex::sessionKeyOf);
     projectsApi.wireAgents(
         launch,
         new AgentSessionQueryService(store, agentSessionStore),
@@ -1026,14 +1071,7 @@ public class ControlSocket {
       // sendLock. So a worker-thread send() (also under the lock) either ran before us (its frame is
       // in the buffer we flush here, in order) or runs after (sees the published socket and writes
       // directly, after the flushed chunks). This closes both the stranding and the reordering race.
-      send(
-          new Hello(
-              projectId,
-              repoName,
-              DaemonProtocol.CAPABILITY_VERSION,
-              buildVersionConfig.orElse(null),
-              buildTimeConfig.orElse(null)),
-          ws);
+      send(hello(), ws);
       send(new DaemonLog("INFO", "projects-daemon online for project " + projectId), ws);
       flushPending(ws);
       socket = ws;
@@ -1048,7 +1086,23 @@ public class ControlSocket {
     if (h != null) {
       workers.execute(h::reportCurrent);
     }
+    // And where every session key stands, for a qits that restarted (nothing before its first
+    // sessions frame); its answering frame on this hello is reported again once applied.
+    SessionKeeper sessions = sessionKeeper;
+    if (sessions != null) {
+      sessions.reportCurrent();
+    }
     LOG.infof("projects-daemon control socket established for project %s", projectId);
+  }
+
+  /** What this daemon announces on every connection, its capability version included. */
+  Hello hello() {
+    return new Hello(
+        projectId,
+        repoName,
+        DaemonProtocol.CAPABILITY_VERSION,
+        buildVersionConfig == null ? null : buildVersionConfig.orElse(null),
+        buildTimeConfig == null ? null : buildTimeConfig.orElse(null));
   }
 
   private void flushPending(WebSocket ws) {
@@ -1063,7 +1117,8 @@ public class ControlSocket {
     vertx.setTimer(backoff, id -> connect(attempt + 1));
   }
 
-  private void onFrame(String json) {
+  /** Decode and dispatch one frame from qits. Package-private so a test can hand it one. */
+  void onFrame(String json) {
     DaemonMessage message;
     try {
       message = DaemonCodec.decode(new JsonObject(json).getMap());
@@ -1078,6 +1133,15 @@ public class ControlSocket {
       case SessionCredentials frame ->
           // Replace semantics, held in memory only; the store logs keys and subjects, never tokens.
           sessionCredentials.replace(frame);
+      case Sessions frame -> {
+        // The desired list, replaced whole (qits-770). Held for a keeper not wired yet; a wired one
+        // only schedules, so nothing here blocks the event loop.
+        lastSessions = frame;
+        SessionKeeper keeper = sessionKeeper;
+        if (keeper != null) {
+          keeper.apply(frame);
+        }
+      }
       case OpenStream request -> {
         // On the event loop: both connects are non-blocking futures and the pumps are
         // handler-driven, so there is nothing here worth a worker thread.
@@ -1138,11 +1202,15 @@ public class ControlSocket {
 
   @PreDestroy
   void stop() {
-    // The keeper stops supervising before the agents are terminated, so the SIGTERM below is not
+    // The keepers stop supervising before the agents are terminated, so the SIGTERM below is not
     // read as a crash to relaunch from.
     FrontDeskKeeper keeper = frontDesk;
     if (keeper != null) {
       keeper.stop();
+    }
+    SessionKeeper sessions = sessionKeeper;
+    if (sessions != null) {
+      sessions.stop();
     }
     FrontDeskInbox inbox = frontDeskInbox;
     if (inbox != null) {

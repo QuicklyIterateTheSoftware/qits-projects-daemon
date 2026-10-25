@@ -4,15 +4,19 @@ import eu.wohlben.qits.agents.AgentLaunchMode;
 import eu.wohlben.qits.agents.AgentLaunchRequest;
 import eu.wohlben.qits.agents.AgentLaunchService;
 import eu.wohlben.qits.agents.AgentMcpScope;
-import eu.wohlben.qits.agents.AgentNotSignedInException;
 import eu.wohlben.qits.agents.AgentSurface;
 import eu.wohlben.qits.commands.AgentSessionRef;
 import eu.wohlben.qits.commands.Command;
 import eu.wohlben.qits.commands.CommandRegistry;
 import eu.wohlben.qits.commands.CommandStatus;
 import eu.wohlben.qits.commands.CommandStore;
+import eu.wohlben.qits.projectsdaemon.SessionKeeper.Scheduler;
+import eu.wohlben.qits.projectsdaemon.SessionKeeper.Timing;
 import eu.wohlben.qits.projectsdaemon.protocol.DaemonLog;
 import eu.wohlben.qits.projectsdaemon.protocol.DaemonMessage;
+import eu.wohlben.qits.projectsdaemon.protocol.SessionCredentials;
+import eu.wohlben.qits.projectsdaemon.protocol.SessionReport;
+import eu.wohlben.qits.projectsdaemon.protocol.Sessions;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
@@ -20,9 +24,6 @@ import java.nio.file.Path;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 import java.util.stream.Stream;
@@ -79,6 +80,15 @@ import org.jboss.logging.Logger;
  * {@link Scheduler}, the clock), so a test drives the ladder deterministically without a real
  * harness or a real wait.
  *
+ * <p><b>The ladder is {@link SessionLadder}</b>, the one every key of the session multiplex climbs
+ * (qits-770); this class is the front desk's specialisation of it — what keeps the desk, what holds
+ * a launch back, which credential it runs on. <b>Once qits sent a {@code sessions} frame</b> ({@link
+ * #desire}) its {@code front-desk} entry replaces {@link Lifecycle} as the reason to keep the desk:
+ * {@code RUNNING} keeps it, {@code STOPPED} or absent does not (the kept session is terminated), and
+ * delivery on still keeps it either way; the entry's {@code resumeSessionId} is the first resume
+ * tried. Every state change is reported to {@link SessionKeeper} ({@link #reportTo}), which puts it
+ * in the {@code sessionReport}; before a frame nothing is sent.
+ *
  * <p>The launch's credential is {@link FrontDeskCredential}'s to decide, asked before every launch:
  * the {@code front-desk} session credential once qits sent credentials; before that, the delivery
  * token while delivering and the container's own token otherwise. Nothing types the delivery loop
@@ -121,49 +131,17 @@ final class FrontDeskKeeper {
     }
   }
 
-  /** The keeper's ladder, in milliseconds. */
-  record Timing(
-      long initialBackoffMs,
-      long maxBackoffMs,
-      long resetAfterMs,
-      long notSignedInRetryMs,
-      long pollMs) {
-
-    /** This daemon's policy: 5 s doubling to 5 min, reset after 10 min up, sign-in every 5 min. */
-    static final Timing DEFAULT = new Timing(5_000, 300_000, 600_000, 300_000, 2_000);
-  }
-
-  /** What the keeper needs of the agent surface, behind one seam a test can fake. */
-  interface Desk {
-
-    /** Launch a session; may throw {@link AgentNotSignedInException}. */
-    Command launch(AgentLaunchRequest request);
-
-    /** The command as the store holds it now, or empty once it is gone. */
-    Optional<Command> find(String commandId);
+  /**
+   * What the keeper needs of the agent surface, behind one seam a test can fake: a ladder's {@link
+   * SessionKeeper.Desk}, and whether somebody else's desk session is up.
+   */
+  interface Desk extends SessionKeeper.Desk {
 
     /**
      * Whether any live {@code project.work} session exists, whoever started it. Asked only while
      * not delivering.
      */
     boolean liveSessionExists();
-
-    /** Whether {@code sessionId}'s transcript is still on the credential volume. */
-    boolean transcriptExists(Command command, String sessionId);
-
-    /**
-     * Terminate {@code commandId} (SIGTERM, then the registry's grace and escalation) — the first
-     * half of a restart onto a changed credential. False when it is not running.
-     */
-    default boolean terminate(String commandId) {
-      return false;
-    }
-
-    /**
-     * Make sure the claude.ai access token is fresh before a launch (qits-1102); see {@link
-     * ClaudeTokenPreflight}. Must not throw, but the keeper launches regardless if it does.
-     */
-    default void refreshCredentials() {}
 
     /** The production {@code project.work} desk over this daemon's launch service and store. */
     static Desk of(
@@ -172,20 +150,21 @@ final class FrontDeskKeeper {
         CommandRegistry registry,
         String claudeMount,
         ClaudeTokenPreflight preflight) {
+      SessionKeeper.Desk agents = SessionKeeper.Desk.of(launch, store, registry, claudeMount, preflight);
       return new Desk() {
         @Override
         public void refreshCredentials() {
-          preflight.ensureFresh();
+          agents.refreshCredentials();
         }
 
         @Override
         public Command launch(AgentLaunchRequest request) {
-          return launch.launch(request);
+          return agents.launch(request);
         }
 
         @Override
         public Optional<Command> find(String commandId) {
-          return store.find(commandId);
+          return agents.find(commandId);
         }
 
         @Override
@@ -199,43 +178,12 @@ final class FrontDeskKeeper {
 
         @Override
         public boolean transcriptExists(Command command, String sessionId) {
-          return FrontDeskKeeper.transcriptExists(claudeMount, command, sessionId);
+          return agents.transcriptExists(command, sessionId);
         }
 
         @Override
         public boolean terminate(String commandId) {
-          return registry.terminate(commandId);
-        }
-      };
-    }
-  }
-
-  /** Runs a step later, off the caller's thread. */
-  interface Scheduler {
-    void schedule(Runnable step, long delayMs);
-
-    void shutdown();
-
-    /** One daemon worker thread, so the keeper never blocks the event loop or the boot worker. */
-    static Scheduler worker() {
-      ScheduledExecutorService executor =
-          Executors.newSingleThreadScheduledExecutor(
-              runnable -> {
-                Thread thread = new Thread(runnable, "projects-daemon-front-desk");
-                thread.setDaemon(true);
-                return thread;
-              });
-      return new Scheduler() {
-        @Override
-        public void schedule(Runnable step, long delayMs) {
-          if (!executor.isShutdown()) {
-            executor.schedule(step, Math.max(0, delayMs), TimeUnit.MILLISECONDS);
-          }
-        }
-
-        @Override
-        public void shutdown() {
-          executor.shutdownNow();
+          return agents.terminate(commandId);
         }
       };
     }
@@ -244,26 +192,25 @@ final class FrontDeskKeeper {
   private final Lifecycle lifecycle;
   private final FrontDeskCredential credential;
   private final Desk desk;
-  private final Timing timing;
   private final Scheduler scheduler;
-  private final LongSupplier clock;
-  private final Consumer<DaemonMessage> send;
+  private final SessionLadder ladder;
 
-  private volatile boolean started;
+  /** Where the ladder's state changes go; nowhere until {@link SessionKeeper} asks for them. */
+  private volatile Consumer<SessionReport.Session> reporter = session -> {};
+
+  /** {@link #start} was called: the checkout and the agent surface are there to launch with. */
+  private volatile boolean armed;
+
   private volatile boolean stopped;
 
-  // Written only on the scheduler's single thread; volatile because the front desk inbox reads it.
-  private volatile String commandId;
+  /** Whether qits sent a {@code sessions} frame, so {@link #desired} — not the lifecycle — decides. */
+  private volatile boolean sessionsMode;
 
-  // Touched only on the scheduler's single thread (and start(), before the first step runs).
-  private Map<String, String> launchedOverlay;
-  private boolean restarting;
+  /** The last frame's {@code front-desk} entry; null when it had none. */
+  private volatile Sessions.Session desired;
+
+  // Touched only on the scheduler's single thread.
   private boolean waitingLogged;
-  private long launchedAt;
-  private long backoffMs;
-  private String previousSessionId;
-  private Command previousCommand;
-  private Integer pendingExitCode;
 
   FrontDeskKeeper(
       Lifecycle lifecycle,
@@ -286,37 +233,68 @@ final class FrontDeskKeeper {
     this.lifecycle = lifecycle;
     this.credential = credential;
     this.desk = desk;
-    this.timing = timing;
     this.scheduler = scheduler;
-    this.clock = clock;
-    this.send = send;
-    this.backoffMs = timing.initialBackoffMs();
+    this.ladder =
+        new SessionLadder(
+            new FrontDesk(), desk, timing, scheduler, clock, send, session -> reporter.accept(session));
   }
 
   /**
-   * Begin keeping the desk, once; a no-op unless {@link Lifecycle#ALWAYS_ON} or delivery is on —
-   * the delivery loop needs a desk to run in, so delivery keeps one even {@link
-   * Lifecycle#ON_DEMAND}. Whether the loop can run yet (its rights may arrive with qits' first
-   * {@code sessionCredentials}) is asked again before every launch.
+   * Begin keeping the desk, once; a no-op unless it is wanted ({@link #wanted}) — {@link
+   * Lifecycle#ALWAYS_ON}, delivery on, or a {@code RUNNING} entry in qits' {@code sessions}. The
+   * delivery loop needs a desk to run in, so delivery keeps one even {@link Lifecycle#ON_DEMAND}.
+   * Whether the loop can run yet (its rights may arrive with qits' first {@code
+   * sessionCredentials}) is asked again before every launch. A desk wanted only later — a frame
+   * that asks for it — is started then.
    */
   void start() {
-    boolean delivering = credential.deliveryOn();
-    if (lifecycle != Lifecycle.ALWAYS_ON && !delivering) {
+    if (armed || stopped) {
+      return;
+    }
+    armed = true;
+    if (!wanted()) {
       LOG.debug("Lifecycle ON_DEMAND: no front desk is kept; the SPA launches one when asked.");
       return;
     }
-    if (started || stopped) {
-      return;
-    }
-    started = true;
-    if (delivering) {
+    if (credential.deliveryOn()) {
       LOG.infof(
           "Keeping the %s %s running with the desk's delivery rights; it delivers when prompted.",
           SURFACE.key(), LABEL);
     } else {
       LOG.infof("Keeping the %s %s running.", SURFACE.key(), LABEL);
     }
-    scheduler.schedule(this::attempt, 0);
+    scheduler.schedule(ladder::reconsider, 0);
+  }
+
+  /**
+   * qits' {@code front-desk} entry of a {@code sessions} frame — null when the frame has none —
+   * which from now on decides whether the desk is kept, in place of the lifecycle. Any thread; the
+   * change is acted on on the keeper's own.
+   */
+  void desire(Sessions.Session entry) {
+    sessionsMode = true;
+    desired = entry;
+    if (armed && !stopped) {
+      scheduler.schedule(ladder::reconsider, 0);
+    }
+  }
+
+  /** Where every state change of the desk's ladder is reported. */
+  void reportTo(Consumer<SessionReport.Session> listener) {
+    this.reporter = listener == null ? session -> {} : listener;
+  }
+
+  /**
+   * Whether the desk is to be kept: delivery on, or — once qits sent {@code sessions} — a {@code
+   * RUNNING} {@code front-desk} entry, else (before that) {@link Lifecycle#ALWAYS_ON}.
+   */
+  boolean wanted() {
+    return credential.deliveryOn() || keptForTheDesk();
+  }
+
+  /** Whether {@link #start} was called, so the desk's ladder may launch. */
+  boolean started() {
+    return armed;
   }
 
   /**
@@ -326,225 +304,103 @@ final class FrontDeskKeeper {
    * token.
    */
   Optional<String> keptCommandId() {
-    return Optional.ofNullable(commandId);
+    return ladder.commandId();
   }
 
   /** Stop supervising; the live session itself is left to {@code CommandRegistry.terminateAll()}. */
   void stop() {
     stopped = true;
+    ladder.stop();
     scheduler.shutdown();
   }
 
-  /**
-   * Launch the desk, unless one is already live. While delivering only the keeper's own session
-   * counts, and this runs only when there is none, so it launches whoever else's is up.
-   */
-  private void attempt() {
-    if (stopped) {
-      return;
+  /** The desk is wanted for its own sake, not only as the delivery loop's room. */
+  private boolean keptForTheDesk() {
+    if (sessionsMode) {
+      Sessions.Session entry = desired;
+      return entry != null && entry.running();
     }
-    if (lifecycle != Lifecycle.ALWAYS_ON && !credential.delivering()) {
-      // Kept only for the delivery loop, and it has no rights to run with yet: no delivery token
-      // and no session credentials from qits (an older qits without a token never sends any). This
-      // is what "no token, no loop" looked like before, minus the desk; ask again on the poll.
-      if (!waitingLogged) {
-        waitingLogged = true;
-        LOG.infof("The %s waits for delivery rights before it launches.", LABEL);
-      }
-      scheduler.schedule(this::attempt, timing.pollMs());
-      return;
-    }
-    try {
-      if (!credential.delivering() && desk.liveSessionExists()) {
-        // Somebody else's desk (the SPA's) is up. Watch it; launch when it is gone.
-        scheduler.schedule(this::poll, timing.pollMs());
-        return;
-      }
-    } catch (RuntimeException e) {
-      LOG.warnf("Could not ask for a live %s session: %s", LABEL, e.getMessage());
-      scheduler.schedule(this::attempt, timing.pollMs());
-      return;
-    }
-    Map<String, String> overlay;
-    try {
-      overlay = credential.launchOverlay();
-    } catch (SessionCredentialStore.AwaitingSessionCredentialsException e) {
-      // Not yet, rather than no: qits has had no chance to send this desk its credentials since the
-      // daemon started or the socket connected. Ask again shortly, without spending a backoff step
-      // and without a WARN — a launch now would race the frame and run on the wrong credential.
-      LOG.debugf("%s waits for session credentials ('%s')", LABEL, e.key());
-      scheduler.schedule(this::attempt, timing.pollMs());
-      return;
-    } catch (SessionCredentialStore.MissingSessionCredentialException e) {
-      // Fail closed (qits-1482): no credential for this session's key means no session, never a
-      // session on another credential. qits may issue one any moment, so ask again on the ladder;
-      // the previous session stays resumable, since nothing about it was refused.
-      String message = LABEL + " not launched: no session credential for '" + e.key() + "'";
-      LOG.warn(message);
-      send.accept(new DaemonLog("WARN", message));
-      scheduler.schedule(this::attempt, nextBackoff());
-      return;
-    }
-    try {
-      // Remote Control connects once, at startup, on whatever token the volume holds; a stale
-      // one leaves the desk at "Remote Control failed · /login" for good (qits-1102).
-      desk.refreshCredentials();
-    } catch (RuntimeException e) {
-      LOG.warnf(
-          "%s: the claude.ai token preflight failed (%s); launching anyway",
-          LABEL, e.getClass().getSimpleName());
-    }
-    String resume = resumableSession();
-    Command command;
-    try {
-      command =
-          desk.launch(
-              new AgentLaunchRequest(
-                  AgentMcpScope.REPOSITORY,
-                  SURFACE,
-                  AgentLaunchMode.INTERACTIVE,
-                  null,
-                  resume,
-                  false,
-                  false,
-                  null,
-                  null,
-                  overlay));
-    } catch (AgentNotSignedInException e) {
-      String message = LABEL + " not signed in: run the login command on the runners page";
-      LOG.warn(message);
-      send.accept(new DaemonLog("WARN", message));
-      scheduler.schedule(this::attempt, timing.notSignedInRetryMs());
-      return;
-    } catch (RuntimeException e) {
-      // A resume the harness refuses must not wedge the desk on that id: the next try is fresh.
-      LOG.warnf("The %s did not launch: %s", LABEL, e.getMessage());
-      previousSessionId = null;
-      previousCommand = null;
-      scheduler.schedule(this::attempt, nextBackoff());
-      return;
-    }
-    commandId = command.id();
-    launchedOverlay = overlay;
-    launchedAt = clock.getAsLong();
-    if (restarting) {
-      restarting = false;
-      pendingExitCode = null;
-      String message = LABEL + " restarted on its new session credential";
-      LOG.info(message);
-      send.accept(new DaemonLog("INFO", message));
-    } else if (pendingExitCode != null) {
-      String message = LABEL + " relaunched (exit " + pendingExitCode + ")";
-      LOG.info(message);
-      send.accept(new DaemonLog("INFO", message));
-      pendingExitCode = null;
-    } else {
-      LOG.infof("%s launched (command %s)", LABEL, commandId);
-    }
-    scheduler.schedule(this::poll, timing.pollMs());
+    return lifecycle == Lifecycle.ALWAYS_ON;
   }
 
-  /** Watch the keeper's session (or somebody else's) and relaunch once it is gone. */
-  private void poll() {
-    if (stopped) {
-      return;
+  /** The front desk as a ladder sees it. */
+  private final class FrontDesk implements SessionLadder.Spec {
+
+    @Override
+    public String key() {
+      return SessionCredentials.FRONT_DESK_KEY;
     }
-    if (commandId == null) {
-      // Watching a session the keeper did not start.
-      attempt();
-      return;
+
+    @Override
+    public String label() {
+      return LABEL;
     }
-    Optional<Command> current;
-    try {
-      current = desk.find(commandId);
-    } catch (RuntimeException e) {
-      scheduler.schedule(this::poll, timing.pollMs());
-      return;
+
+    @Override
+    public boolean wanted() {
+      return !stopped && FrontDeskKeeper.this.wanted();
     }
-    long now = clock.getAsLong();
-    if (current.isPresent() && current.get().status() == CommandStatus.RUNNING) {
-      if (now - launchedAt >= timing.resetAfterMs()) {
-        backoffMs = timing.initialBackoffMs();
-      }
-      if (!restarting && credentialChanged()) {
-        // qits re-issued the front desk's credential (the loop toggled, a token rotated): the
-        // session's environment and MCP bearer are fixed at launch, so it is restarted onto the new
-        // one, resuming its transcript. SIGTERM first, so remote control archives cleanly.
-        restarting = true;
-        LOG.infof("%s: its session credential changed; restarting it (command %s)", LABEL, commandId);
-        try {
-          desk.terminate(commandId);
-        } catch (RuntimeException e) {
-          LOG.warnf("Could not terminate the %s for its restart: %s", LABEL, e.getMessage());
+
+    /**
+     * Launch only when no live {@code project.work} session exists, unless delivering — and not at
+     * all while the desk is kept only for the delivery loop and has no rights to run it with yet.
+     */
+    @Override
+    public String holdOff() {
+      if (!keptForTheDesk() && !credential.delivering()) {
+        // Kept only for the delivery loop, and it has no rights to run with yet: no delivery token
+        // and no session credentials from qits (an older qits without a token never sends any).
+        // This is what "no token, no loop" looked like before, minus the desk; ask again on the poll.
+        if (!waitingLogged) {
+          waitingLogged = true;
+          LOG.infof("The %s waits for delivery rights before it launches.", LABEL);
         }
+        return "waiting for delivery rights";
       }
-      scheduler.schedule(this::poll, timing.pollMs());
-      return;
-    }
-    // Exited (or evicted from the store, which only a long-dead command is).
-    Command exited = current.orElse(null);
-    if (now - launchedAt >= timing.resetAfterMs()) {
-      backoffMs = timing.initialBackoffMs();
-    }
-    if (exited != null) {
-      AgentSessionRef session = exited.currentSession();
-      if (session != null && session.sessionId() != null) {
-        previousSessionId = session.sessionId();
-        previousCommand = exited;
+      try {
+        if (!credential.delivering() && desk.liveSessionExists()) {
+          // Somebody else's desk (the SPA's) is up. Watch it; launch when it is gone.
+          return "a project.work session started from the desk panel is live; launching when it"
+              + " ends";
+        }
+      } catch (RuntimeException e) {
+        LOG.warnf("Could not ask for a live %s session: %s", LABEL, e.getMessage());
+        return "could not ask for a live project.work session";
       }
-    }
-    Integer code = exited == null ? null : exited.exitCode();
-    pendingExitCode = code == null ? -1 : code;
-    commandId = null;
-    // A restart onto a new credential is not a crash: relaunch at once, without a backoff step.
-    long delay = restarting ? 0 : nextBackoff();
-    LOG.debugf(
-        "%s exited (exit %d); relaunching in %d ms",
-        LABEL,
-        (Object) pendingExitCode,
-        (Object) delay);
-    scheduler.schedule(this::attempt, delay);
-  }
-
-  /**
-   * Whether the credential the kept session was launched with is no longer the one it would be
-   * launched with now. Only ever true in per-session mode — a legacy credential is read from the
-   * environment and cannot change — and only for a credential that is there: a key qits withdrew
-   * leaves the running session alone (its next launch fails closed), as does the grace window.
-   */
-  private boolean credentialChanged() {
-    if (launchedOverlay == null || !credential.perSessionMode()) {
-      return false;
-    }
-    try {
-      return !credential.launchOverlay().equals(launchedOverlay);
-    } catch (RuntimeException e) {
-      return false;
-    }
-  }
-
-  /** The current backoff, doubling the next one up to the cap. */
-  private long nextBackoff() {
-    long delay = backoffMs;
-    backoffMs = Math.min(timing.maxBackoffMs(), Math.max(1, backoffMs) * 2);
-    return delay;
-  }
-
-  /** The previous keeper session's id while its transcript exists, otherwise null. */
-  private String resumableSession() {
-    if (previousSessionId == null) {
       return null;
     }
-    try {
-      if (desk.transcriptExists(previousCommand, previousSessionId)) {
-        return previousSessionId;
-      }
-    } catch (RuntimeException e) {
-      LOG.debugf("Could not look for transcript %s: %s", previousSessionId, e.getMessage());
+
+    @Override
+    public Map<String, String> overlay() {
+      return credential.launchOverlay();
     }
-    previousSessionId = null;
-    previousCommand = null;
-    return null;
+
+    /** A legacy credential is read from the environment and cannot change. */
+    @Override
+    public boolean restartsOnCredentialChange() {
+      return credential.perSessionMode();
+    }
+
+    @Override
+    public String preferredResume() {
+      Sessions.Session entry = desired;
+      return entry == null ? null : entry.resumeSessionId();
+    }
+
+    @Override
+    public AgentLaunchRequest request(String resumeSessionId, Map<String, String> overlay) {
+      return new AgentLaunchRequest(
+          AgentMcpScope.REPOSITORY,
+          SURFACE,
+          AgentLaunchMode.INTERACTIVE,
+          null,
+          resumeSessionId,
+          false,
+          false,
+          null,
+          null,
+          overlay);
+    }
   }
 
   /**

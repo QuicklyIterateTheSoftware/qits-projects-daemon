@@ -173,14 +173,24 @@ final class AgentJson {
 
   /** {@code GET /agent-sessions} — the session tree. */
   static JsonObject sessions(List<AgentSessionNodeDto> sessions) {
+    return sessions(sessions, CommandJson.NO_SESSION_KEYS);
+  }
+
+  /**
+   * {@code GET /agent-sessions}, each node with the {@code sessionKey} its newest command was
+   * launched for (qits-770) when a keeper launched it; absent otherwise.
+   */
+  static JsonObject sessions(
+      List<AgentSessionNodeDto> sessions, Function<String, String> sessionKeyOf) {
     JsonArray array = new JsonArray();
     for (AgentSessionNodeDto session : sessions) {
-      array.add(session(session));
+      array.add(session(session, sessionKeyOf));
     }
     return new JsonObject().put("sessions", array);
   }
 
-  private static JsonObject session(AgentSessionNodeDto node) {
+  private static JsonObject session(
+      AgentSessionNodeDto node, Function<String, String> sessionKeyOf) {
     JsonObject json = new JsonObject().put("sessionId", node.sessionId());
     putIfPresent(json, "firstRecordedAt", iso(node.firstRecordedAt()));
     putIfPresent(json, "forkedFromSessionId", node.forkedFromSessionId());
@@ -189,6 +199,9 @@ final class AgentJson {
       json.put("messageCount", node.messageCount());
     }
     putIfPresent(json, "newestCommandId", node.newestCommandId());
+    if (node.newestCommandId() != null) {
+      putIfPresent(json, "sessionKey", sessionKeyOf.apply(node.newestCommandId()));
+    }
     JsonArray subagents = new JsonArray();
     for (AgentSubagentDto subagent : node.subagents()) {
       subagents.add(subagent(subagent));
@@ -196,7 +209,7 @@ final class AgentJson {
     json.put("subagents", subagents);
     JsonArray children = new JsonArray();
     for (AgentSessionNodeDto child : node.children()) {
-      children.add(session(child));
+      children.add(session(child, sessionKeyOf));
     }
     return json.put("children", children);
   }

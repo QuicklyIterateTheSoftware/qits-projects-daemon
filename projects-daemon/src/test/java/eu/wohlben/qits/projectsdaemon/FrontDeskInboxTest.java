@@ -65,7 +65,7 @@ class FrontDeskInboxTest {
   }
 
   /** Runs every flush at once, on the caller's thread. */
-  private static final class DirectScheduler implements FrontDeskKeeper.Scheduler {
+  private static final class DirectScheduler implements SessionKeeper.Scheduler {
     @Override
     public void schedule(Runnable step, long delayMs) {
       step.run();

@@ -43,8 +43,13 @@ library declares:
     CheckoutFollower        supervising `qits checkout-daemon`, which holds /workspace at what the
                             repositories released; started after the boot provision and the API
     FrontDeskKeeper         keeping the project.work front desk running when the lifecycle is ALWAYS_ON or
-                            delivery is on; started after the follower, only on a successful provision with
+                            delivery is on — or, once qits sent `sessions`, while its front-desk entry is
+                            RUNNING; started after the follower, only on a successful provision with
                             agents wired; while delivering it tracks and keeps ITS OWN command
+    SessionKeeper           the session multiplex (qits-770): one ladder per session key of qits' `sessions`
+                            frame, the front desk's being FrontDeskKeeper's; answers with `sessionReport`
+    SessionLadder           one key's keep-it-running ladder — launch, backoff, resume, preflight, fail-closed
+                            credential, stop — written once; FrontDeskKeeper and every entity key climb it
     FrontDeskCredential     the one seam deciding the front desk launch's credential: the `front-desk` session
                             credential once qits sent any; before that (legacy) the delivery token as
                             QITS_TOKEN while delivering, the container's own token otherwise
@@ -123,7 +128,8 @@ A change to the protocol is therefore:
    point — the host that must understand a frame is the one whose gate now sees the change.
 
 Bump `CAPABILITY_VERSION` whenever the backend must branch on the change (2: `sessionCredentials`,
-qits-1482 — sent only to a daemon announcing 2). It starts at **1**, not
+qits-1482 — sent only to a daemon announcing 2; 3: `sessions`/`sessionReport`, the session multiplex,
+qits-770 — `sessions` sent only to a daemon announcing 3). It starts at **1**, not
 at the workspace daemon's 4: the two protocols share a shape and a lineage but not a namespace,
 and a shared number would suggest a compatibility relation that does not exist. Version 1 already
 binds loopback and serves `OpenStream`, which the workspace daemon only reached at 4 — there is no
@@ -413,7 +419,8 @@ derive fails at the boundary instead of far from it.
                                          first sessionCredentials frame before legacy mode, from daemon start and
                                          again from the first connection
     QITS_PROJECTS_DAEMON_LIFECYCLE       ALWAYS_ON | ON_DEMAND (default; anything else ⇒ one WARN, ON_DEMAND);
-                                         ALWAYS_ON keeps a project.work front-desk session running (FrontDeskKeeper):
+                                         ALWAYS_ON keeps a project.work front-desk session running (FrontDeskKeeper) —
+                                         until qits sends a `sessions` frame, whose front-desk entry decides from then on:
                                          launched at boot unless one is live, relaunched on exit (5 s doubling to
                                          5 min, reset after 10 min up, never gives up), resuming the previous
                                          session while its transcript exists; not signed in ⇒ a DaemonLog WARN and
@@ -473,7 +480,7 @@ checkout-daemon` picks its edge-token mode off the same name.
 **Per-session credentials ride the control socket** (`sessionCredentials`, capability 2). qits sends
 the full list — `[{key, token, subject}]` — on `hello` and on every change; the daemon holds it in
 memory (`SessionCredentialStore`), replaced wholesale per frame. Two keys, plus an entity id per
-refinement session later (qits-770):
+refinement session (qits-770, see "The session multiplex"):
 
     front-desk    the ONE front desk session (FrontDeskKeeper), which runs a delivery pass when prompted.
                   qits puts the desk-delivery token (qits:agent + qits:desk) here while the loop is on,
@@ -526,6 +533,60 @@ Every identity value is `Optional<String>` in the code, never `@ConfigProperty(d
 SmallRye reads an empty default as *no value* and then fails to resolve a plain `String`, which
 kills the binary at startup — and no test sees it, because the tests construct these classes
 directly and never resolve config.
+
+## The session multiplex (qits-770)
+
+One container runs every session of the desk — the front desk and one per refinement — each under a
+**session key**, and qits says which it wants over the control socket (capability 3). Both frames are
+always the full list, and the receiver replaces what it held:
+
+    sessions        qits → daemon   [{key, surface, state: RUNNING|STOPPED, resumeSessionId,
+                                      entity: {qualifiedId, title, status, blocked, blockSource} | null}]
+                                    on hello, on every change, and periodically
+    sessionReport   daemon → qits   [{key, state: STARTING|RUNNING|STOPPED|FAILED, commandId, sessionId,
+                                      detail}] — front-desk first, then the frame's keys in its order;
+                                    on every change, once per applied frame, once per reconnect
+
+The keys are `sessionCredentials`' keys, and each session runs on its own:
+
+    front-desk    the front desk (FrontDeskKeeper), surface project.work. Its entry REPLACES
+                  QITS_PROJECTS_DAEMON_LIFECYCLE: RUNNING keeps the desk, STOPPED or absent does not (the
+                  kept session is terminated). Delivery on still keeps it either way. Surface and entity
+                  are ignored; the desk stays the container's own entity
+    <entity UUID> a refinement (SessionKeeper): an interactive REPOSITORY-scoped session of the entry's
+                  surface (epic.chat), launched withSessionKey(key, qualifiedId, facts) so it is named from
+                  its entity, on the key's credential ONLY — no legacy fallback, so a refinement never
+                  runs as the container
+
+**One ladder per key** (`SessionLadder`), the front desk's rules written once: launch when wanted and
+missing; relaunch on exit, 5 s doubling to 5 min, reset after 10 min up, never giving up; resume while
+the transcript exists — qits' `resumeSessionId` first (it learns it from the report's `sessionId`, so a
+key survives a container recreation), else the key's previous session, never one the harness already
+refused; `ClaudeTokenPreflight` before each launch; not signed in ⇒ WARN every 5 min; no credential ⇒
+fail closed on the backoff ladder; a changed credential ⇒ terminate and relaunch at once, resuming. A
+key whose entry turns STOPPED or leaves the frame is SIGTERMed and its entity forgotten
+(`forgetEntity`); a running key whose entity changed is renamed in place (`setEntity(key, …)`). The
+same frame again changes nothing — no relaunch, no rename, no backoff cut short — which is what makes
+the periodic resend safe.
+
+**Threading.** Frames only schedule. The entity ladders and the frame's application share the
+SessionKeeper's one worker thread — the library's `setEntity`/`forgetEntity` assume one caller, and the
+token preflights must not race on the shared credential file — while the front desk keeps its own, as
+it always had. A frame that arrives before the boot provision finished is held and its keys reported
+STARTING ("waiting for the checkout"); a failed provision reports every wanted key FAILED for good.
+
+**Legacy.** Until the first `sessions` frame — a capability-2 qits — nothing of this exists: the front
+desk follows the lifecycle, no other session is kept, and no `sessionReport` is sent.
+
+**The desk panel can tell them apart.** `GET /commands`, `GET /commands/{id}` and `/terminate` carry
+`sessionKey` on a command a keeper launched (front-desk or an entity UUID), `GET /agent-sessions` on a
+node whose newest command was; absent on everything else — a person's `POST /agents` launch, an action,
+the sign-in terminal. Additive: no existing key moved.
+
+**The two frames have no golden master.** `golden-masters/` records the loopback HTTP API, and no
+control-socket frame has ever been recorded there; the wire shape is pinned by `DaemonCodecTest`, which
+asserts both frames' maps as literals, and qits-projects-service consumes it as the released protocol
+jar.
 
 ## Two rules that keep the container alive
 

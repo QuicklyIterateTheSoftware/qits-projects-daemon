@@ -1,7 +1,7 @@
 package eu.wohlben.qits.projectsdaemon;
 
 import eu.wohlben.qits.commands.GuardedInput;
-import eu.wohlben.qits.projectsdaemon.FrontDeskKeeper.Scheduler;
+import eu.wohlben.qits.projectsdaemon.SessionKeeper.Scheduler;
 import eu.wohlben.qits.projectsdaemon.protocol.DaemonProtocol.AgentState;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
