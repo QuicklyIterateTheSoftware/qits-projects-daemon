@@ -350,6 +350,23 @@ class FrontDeskKeeperTest {
         "a blank subject removes the container's own rather than naming a different token");
   }
 
+  /** qits-1618: the overlay carries the desk's project id, so the desk's own `qits wait` needs no flag. */
+  @Test
+  void launchOverlayCarriesTheDesksProjectIdWhenGivenOne() {
+    assertNull(
+        FrontDeskCredential.SCRUBBED.launchOverlay().get(FrontDeskCredential.DESK_PROJECT),
+        "the two-argument constructor (every existing caller) names no project");
+    FrontDeskCredential withProject =
+        new FrontDeskCredential(
+            DeliveryKeeper.Settings.OFF, SessionCredentialStore.withoutOwnToken(), "p-1");
+    assertEquals("p-1", withProject.launchOverlay().get(FrontDeskCredential.DESK_PROJECT));
+    FrontDeskCredential blankProject =
+        new FrontDeskCredential(DeliveryKeeper.Settings.OFF, SessionCredentialStore.withoutOwnToken(), "");
+    assertNull(
+        blankProject.launchOverlay().get(FrontDeskCredential.DESK_PROJECT),
+        "a blank project id names nothing, same as the two-argument constructor");
+  }
+
   // --- session credentials (qits-1482) ---------------------------------------------------------
 
   /** The container's own token, which a legacy launch without the delivery rights runs on. */

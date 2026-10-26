@@ -753,7 +753,7 @@ public class ControlSocket {
     DeliveryKeeper.Settings deliverySettings =
         DeliveryKeeper.Settings.parse(delivery, deliveryToken, deliveryTokenSubject);
     FrontDeskCredential frontDeskCredential =
-        new FrontDeskCredential(deliverySettings, sessionCredentials);
+        new FrontDeskCredential(deliverySettings, sessionCredentials, projectId);
     FrontDeskKeeper keeper =
         new FrontDeskKeeper(
             FrontDeskKeeper.Lifecycle.parse(lifecycle),
