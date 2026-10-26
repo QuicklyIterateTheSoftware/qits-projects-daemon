@@ -1,6 +1,7 @@
 package eu.wohlben.qits.projectsdaemon;
 
 import eu.wohlben.qits.projectsdaemon.protocol.SessionCredentials;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 
@@ -25,7 +26,10 @@ import java.util.Optional;
  *
  * <p>Either way the overlay starts from {@link DaemonSecrets#SCRUB}, so the session inherits no
  * daemon secret and holds its credential under the spelling it reads ({@code QITS_TOKEN}, which the
- * library also makes the bearer on the launch's platform MCP servers).
+ * library also makes the bearer on the launch's platform MCP servers). On top of that, the overlay
+ * always carries {@code QITS_DESK_PROJECT}, this desk's project id (qits-1618): it is what lets a
+ * {@code qits wait} run by the front desk's own shell — which otherwise has no {@code QITS_AGENT_ID}
+ * to fall back on — declare and list its waits on qits-workspaces' desk door rather than an agent's.
  *
  * <p>{@link FrontDeskKeeper} asks this and nothing else, before every launch and on every poll (to
  * notice a changed credential); no other launch path consults it, so a {@code project.work} session
@@ -33,16 +37,27 @@ import java.util.Optional;
  */
 final class FrontDeskCredential {
 
+  /** The project a desk's launch overlay names itself by, so {@code qits wait --desk} needs no flag. */
+  static final String DESK_PROJECT = "QITS_DESK_PROJECT";
+
   /** Delivery off and no credentials ever sent: the front desk runs as the container, scrubbed. */
   static final FrontDeskCredential SCRUBBED =
       new FrontDeskCredential(DeliveryKeeper.Settings.OFF, SessionCredentialStore.withoutOwnToken());
 
   private final DeliveryKeeper.Settings settings;
   private final SessionCredentialStore credentials;
+  private final String projectId;
 
   FrontDeskCredential(DeliveryKeeper.Settings settings, SessionCredentialStore credentials) {
+    this(settings, credentials, "");
+  }
+
+  /** @param projectId this desk's project, carried in the launch overlay as {@link #DESK_PROJECT} */
+  FrontDeskCredential(
+      DeliveryKeeper.Settings settings, SessionCredentialStore credentials, String projectId) {
     this.settings = settings;
     this.credentials = credentials;
+    this.projectId = projectId == null ? "" : projectId;
   }
 
   /** Whether the delivery switch is on — the loop is wanted, whether or not it can run yet. */
@@ -60,22 +75,29 @@ final class FrontDeskCredential {
 
   /**
    * The front desk launch's environment overlay: {@link DaemonSecrets#SCRUB}, then the credential
-   * this class's javadoc describes.
+   * this class's javadoc describes, then {@link #DESK_PROJECT} — this desk's project id, when it has
+   * one.
    *
    * @throws SessionCredentialStore.AwaitingSessionCredentialsException inside the grace window
    * @throws SessionCredentialStore.MissingSessionCredentialException in per-session mode without a
    *     {@code front-desk} credential
    */
   Map<String, String> launchOverlay() {
-    return DaemonSecrets.overlay(
-        Map.of(),
-        credentials.overlayFor(
-            SessionCredentials.FRONT_DESK_KEY,
-            () ->
-                settings.runnable()
-                    ? Optional.of(
-                        DaemonSecrets.credential(settings.token(), settings.tokenSubject()))
-                    : Optional.empty()));
+    Map<String, String> overlay =
+        DaemonSecrets.overlay(
+            Map.of(),
+            credentials.overlayFor(
+                SessionCredentials.FRONT_DESK_KEY,
+                () ->
+                    settings.runnable()
+                        ? Optional.of(
+                            DaemonSecrets.credential(settings.token(), settings.tokenSubject()))
+                        : Optional.empty()));
+    if (!projectId.isBlank()) {
+      overlay = new HashMap<>(overlay);
+      overlay.put(DESK_PROJECT, projectId);
+    }
+    return overlay;
   }
 
   /** Whether qits has sent credentials, so a changed one is a reason to restart the session. */
