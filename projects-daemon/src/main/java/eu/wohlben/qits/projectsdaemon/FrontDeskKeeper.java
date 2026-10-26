@@ -54,7 +54,10 @@ import org.jboss.logging.Logger;
  *       starts at 5 s and doubles to 5 min, and resets once a session stayed up for 10 min. It never
  *       gives up: a desk that stops coming back is the failure this class exists to remove.
  *   <li><b>Resume:</b> a relaunch continues the previous keeper session while its transcript still
- *       exists, so the remote-control thread survives a crash of its process.
+ *       exists, so the remote-control thread survives a crash of its process. A resumed desk is
+ *       told it was interrupted, and why, in one turn through {@link FrontDeskInbox} ({@link
+ *       #promptResumesTo}) — typed once the new session is idle, never over a person's draft. A
+ *       fresh one is told nothing.
  *   <li><b>Fresh token:</b> before every launch the claude.ai access token on the credential
  *       volume is refreshed through {@code claude} itself when it is missing, unreadable or within
  *       5 min of expiry ({@link ClaudeTokenPreflight}), because Remote Control connects only at
@@ -195,6 +198,9 @@ final class FrontDeskKeeper {
   private final Scheduler scheduler;
   private final SessionLadder ladder;
 
+  /** Where the interrupted turn of a resumed desk goes; nowhere until {@link #promptResumesTo}. */
+  private volatile Consumer<String> inbox = text -> {};
+
   /** Where the ladder's state changes go; nowhere until {@link SessionKeeper} asks for them. */
   private volatile Consumer<SessionReport.Session> reporter = session -> {};
 
@@ -282,6 +288,23 @@ final class FrontDeskKeeper {
   /** Where every state change of the desk's ladder is reported. */
   void reportTo(Consumer<SessionReport.Session> listener) {
     this.reporter = listener == null ? session -> {} : listener;
+  }
+
+  /**
+   * Where the turn telling a resumed desk it was interrupted goes ({@link FrontDeskInbox#prompt}),
+   * set once the inbox — which reads {@link #keptCommandId()} — is built over this keeper.
+   */
+  void promptResumesTo(Consumer<String> inbox) {
+    this.inbox = inbox == null ? text -> {} : inbox;
+  }
+
+  /** The one turn a resumed desk gets: it was interrupted, why, and to re-read its brief. */
+  static String interruptedPrompt(SessionLadder.Reason reason) {
+    return "You were interrupted (reason: "
+        + reason.text()
+        + "). Re-read "
+        + DeliveryKeeper.BRIEF_PATH
+        + ", it may have changed, then carry on where you stopped.";
   }
 
   /**
@@ -400,6 +423,14 @@ final class FrontDeskKeeper {
           null,
           null,
           overlay);
+    }
+
+    /** A resumed desk is told it was interrupted; the inbox types it once the session is idle. */
+    @Override
+    public void launched(String resumedSessionId, SessionLadder.Reason reason) {
+      if (resumedSessionId != null) {
+        inbox.accept(interruptedPrompt(reason));
+      }
     }
   }
 

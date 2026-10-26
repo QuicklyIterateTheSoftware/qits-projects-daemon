@@ -16,10 +16,12 @@ import eu.wohlben.qits.commands.AgentSessionSource;
 import eu.wohlben.qits.commands.Command;
 import eu.wohlben.qits.commands.CommandKind;
 import eu.wohlben.qits.commands.CommandStatus;
+import eu.wohlben.qits.commands.GuardedInput;
 import eu.wohlben.qits.projectsdaemon.FrontDeskKeeper.Lifecycle;
 import eu.wohlben.qits.projectsdaemon.protocol.DaemonLog;
 import eu.wohlben.qits.projectsdaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.projectsdaemon.protocol.SessionCredentials;
+import eu.wohlben.qits.projectsdaemon.protocol.Sessions;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -96,6 +98,7 @@ class FrontDeskKeeperTest {
     boolean transcriptPresent = true;
     final List<Long> refreshTimes = new ArrayList<>();
     boolean refreshThrows;
+    String refusedResume;
 
     @Override
     public void refreshCredentials() {
@@ -109,6 +112,9 @@ class FrontDeskKeeperTest {
     public Command launch(AgentLaunchRequest request) {
       if (!signedIn) {
         throw new AgentNotSignedInException(AgentType.CLAUDE);
+      }
+      if (request.resumeSessionId() != null && request.resumeSessionId().equals(refusedResume)) {
+        throw new IllegalStateException("No conversation found with session ID");
       }
       launches.add(request);
       launchTimes.add(now);
@@ -185,6 +191,16 @@ class FrontDeskKeeperTest {
   private final FakeDesk desk = new FakeDesk();
   private final List<DaemonMessage> sent = new ArrayList<>();
 
+  /** The turns a keeper handed its inbox ({@link FrontDeskKeeper#promptResumesTo}). */
+  private final List<String> prompts = new ArrayList<>();
+
+  private static String interrupted(String reason) {
+    return "You were interrupted (reason: "
+        + reason
+        + "). Re-read /tmp/qits-delivery-brief.md, it may have changed, then carry on where you"
+        + " stopped.";
+  }
+
   private FrontDeskKeeper keeper(Lifecycle lifecycle) {
     return new FrontDeskKeeper(lifecycle, desk, TIMING, scheduler, () -> now, sent::add);
   }
@@ -215,7 +231,10 @@ class FrontDeskKeeperTest {
             null,
             DaemonSecrets.SCRUB),
         request);
-    assertTrue(logs().isEmpty(), "a first launch is not a relaunch");
+    assertEquals(
+        List.of(new DaemonLog("INFO", "front desk launched fresh: no previous session")),
+        logs(),
+        "a first launch is not a relaunch, and says why it resumed nothing");
   }
 
   /**
@@ -483,8 +502,10 @@ class FrontDeskKeeperTest {
   void aChangedFrontDeskCredentialRestartsTheSessionResumingIt() {
     credentials.replace(frame(cred("front-desk", "qits_tok_session", "tok-desk-session")));
     FrontDeskKeeper keeper = withCredential("on", null);
+    keeper.promptResumesTo(prompts::add);
     keeper.start();
     advance(0);
+    assertTrue(prompts.isEmpty(), "a fresh desk is told nothing");
     String first = keeper.keptCommandId().orElseThrow();
     String sessionId = desk.commands.get(first).currentSession().sessionId();
 
@@ -501,6 +522,10 @@ class FrontDeskKeeperTest {
     assertEquals(
         overlay("qits_tok_dd", "tok-desk-delivery"), desk.launches.getLast().environment());
     assertEquals("front desk restarted on its new session credential", logs().getLast().message());
+    assertEquals(
+        List.of(interrupted("its session credential changed")),
+        prompts,
+        "the restarted desk is told why, once");
 
     advance(TIMING.pollMs() * 3);
     assertEquals(1, desk.terminated.size(), "and it stays up on the new one");
@@ -537,7 +562,7 @@ class FrontDeskKeeperTest {
       assertEquals(noticedAt + expected.get(i), desk.launchTimes.getLast());
       assertTrue(exitedAt <= noticedAt);
     }
-    List<DaemonLog> logs = logs();
+    List<DaemonLog> logs = logs().subList(1, logs().size()); // the first: the fresh boot launch
     assertEquals(expected.size(), logs.size(), "one DaemonLog per relaunch");
     assertEquals("INFO", logs.getFirst().level());
     assertEquals("front desk relaunched (exit 1)", logs.getFirst().message());
@@ -554,19 +579,122 @@ class FrontDeskKeeperTest {
 
   @Test
   void aRelaunchResumesThePreviousSessionWhileItsTranscriptExists() {
-    keeper(Lifecycle.ALWAYS_ON).start();
+    FrontDeskKeeper keeper = keeper(Lifecycle.ALWAYS_ON);
+    keeper.promptResumesTo(prompts::add);
+    keeper.start();
     advance(0);
     String first = desk.lastRunning().currentSession().sessionId();
 
     desk.exitLast(0);
     advance(TIMING.pollMs() + TIMING.initialBackoffMs());
     assertEquals(first, desk.launches.getLast().resumeSessionId());
+    assertEquals(List.of(interrupted("the session exited (exit 0)")), prompts);
 
     desk.transcriptPresent = false;
     desk.exitLast(0);
     advance(TIMING.pollMs() + TIMING.maxBackoffMs());
     assertEquals(3, desk.launches.size());
     assertNull(desk.launches.getLast().resumeSessionId(), "no transcript, no resume");
+    assertEquals(1, prompts.size(), "and a fresh desk is told nothing");
+    assertEquals(
+        new DaemonLog("INFO", "front desk launched fresh: transcript of " + first + " missing"),
+        logs().getLast());
+
+    // One reason per launch, naming the session it could not resume — never one per poll.
+    String third = desk.lastRunning().currentSession().sessionId();
+    int before = logs().size();
+    advance(TIMING.resetAfterMs());
+    assertEquals(before, logs().size(), "a running desk logs nothing on its polls");
+    desk.exitLast(0);
+    advance(TIMING.pollMs() + TIMING.maxBackoffMs());
+    assertEquals(4, desk.launches.size());
+    assertEquals(
+        new DaemonLog("INFO", "front desk launched fresh: transcript of " + third + " missing"),
+        logs().getLast());
+    assertEquals(1, prompts.size());
+  }
+
+  /**
+   * The resume qits named is refused by the harness: the relaunch that follows is fresh, says why
+   * in a DaemonLog INFO, and types nothing.
+   */
+  @Test
+  void aRefusedResumeRelaunchesFreshAndSaysWhy() {
+    String named = "11111111-1111-1111-1111-111111111111";
+    desk.refusedResume = named;
+    FrontDeskKeeper keeper = keeper(Lifecycle.ON_DEMAND);
+    keeper.promptResumesTo(prompts::add);
+    keeper.start();
+    keeper.desire(
+        new Sessions.Session(SessionCredentials.FRONT_DESK_KEY, "project.work", "RUNNING", named, null));
+    advance(0);
+    assertTrue(desk.launches.isEmpty(), "the resume was refused");
+
+    advance(TIMING.initialBackoffMs());
+    assertEquals(1, desk.launches.size());
+    assertNull(desk.launches.getFirst().resumeSessionId(), "the refused id is not tried again");
+    assertEquals(
+        new DaemonLog(
+            "INFO",
+            "front desk launched fresh: resume of "
+                + named
+                + " refused: No conversation found with session ID"),
+        logs().getLast());
+    assertTrue(prompts.isEmpty());
+  }
+
+  /**
+   * The first launch of a fresh daemon process resuming the id qits named: the container was
+   * recreated, and the turn saying so reaches the real inbox, which holds it until the new
+   * session's SessionStart reports it idle.
+   */
+  @Test
+  void aRecreatedContainerResumingTheNamedSessionIsToldSoThroughTheInbox() {
+    String named = "22222222-2222-2222-2222-222222222222";
+    Map<String, String> activity = new HashMap<>();
+    List<String> typed = new ArrayList<>();
+    FrontDeskKeeper keeper = keeper(Lifecycle.ON_DEMAND);
+    FrontDeskInbox inbox =
+        new FrontDeskInbox(
+            keeper::keptCommandId,
+            new DeliveryKeeper.Session() {
+              @Override
+              public boolean running(String commandId) {
+                return desk.find(commandId).map(Command::isRunning).orElse(false);
+              }
+
+              @Override
+              public Optional<String> activityState(String commandId) {
+                return Optional.ofNullable(activity.get(commandId));
+              }
+
+              @Override
+              public GuardedInput send(String commandId, String text) {
+                typed.add(text);
+                return GuardedInput.WRITTEN;
+              }
+            },
+            commandId -> List.of(),
+            scheduler,
+            () -> now);
+    keeper.promptResumesTo(inbox::prompt);
+    keeper.start();
+    keeper.desire(
+        new Sessions.Session(SessionCredentials.FRONT_DESK_KEY, "project.work", "RUNNING", named, null));
+    advance(0);
+
+    assertEquals(named, desk.launches.getFirst().resumeSessionId());
+    assertTrue(typed.isEmpty(), "queued until the new session is idle");
+    assertEquals(1, inbox.queued());
+    assertTrue(
+        logs().stream().noneMatch(log -> log.message().contains("launched fresh")),
+        "a resumed launch has nothing to explain");
+
+    String kept = keeper.keptCommandId().orElseThrow();
+    activity.put(kept, "IDLE");
+    inbox.onActivity(kept, "IDLE"); // its SessionStart
+    advance(0);
+    assertEquals(List.of(interrupted("the desk container was recreated")), typed);
   }
 
   @Test

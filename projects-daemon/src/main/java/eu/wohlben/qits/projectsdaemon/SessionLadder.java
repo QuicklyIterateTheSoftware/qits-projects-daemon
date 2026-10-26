@@ -27,6 +27,9 @@ import org.jboss.logging.Logger;
  *       and resets once a session stayed up for 10 min. It never gives up.
  *   <li><b>Resume</b> while the transcript exists: the id qits named ({@link Spec#preferredResume})
  *       first, else the key's previous session. A resume the harness refused is not tried again.
+ *       Every launch carries its {@link Reason}, which {@link Spec#launched} hears with the session
+ *       it resumed; a fresh launch says in a {@link DaemonLog} INFO why it resumed nothing, when
+ *       there was something to resume or it is the ladder's first.
  *   <li><b>Fresh token:</b> {@link ClaudeTokenPreflight} before every launch; a failure is logged and
  *       the launch goes ahead.
  *   <li><b>Credential per key</b> ({@link Spec#overlay}): inside the grace window it waits quietly;
@@ -89,7 +92,37 @@ final class SessionLadder {
 
     /** The launch, resuming {@code resumeSessionId} (null: fresh), on {@code overlay}. */
     AgentLaunchRequest request(String resumeSessionId, Map<String, String> overlay);
+
+    /**
+     * A launch succeeded, on the ladder's thread: {@code resumedSessionId} is the session it
+     * resumed, null when it is fresh, and {@code reason} why it happened. Must not throw.
+     */
+    default void launched(String resumedSessionId, Reason reason) {}
   }
+
+  /**
+   * Why the ladder launches, worded for the session it resumes ("You were interrupted (reason:
+   * …)").
+   */
+  record Reason(String text) {
+
+    /** {@link Spec#restartsOnCredentialChange}: the session was restarted onto a new credential. */
+    static final Reason CREDENTIAL_CHANGED = new Reason("its session credential changed");
+
+    /** The first launch of this daemon process: whatever ran before ran in another container. */
+    static final Reason CONTAINER_RECREATED = new Reason("the desk container was recreated");
+
+    /** The session was stopped (no longer wanted) and is wanted again. */
+    static final Reason WANTED_AGAIN = new Reason("the session was stopped and is wanted again");
+
+    /** The session exited on its own, with {@code exitCode} (-1 when unknown). */
+    static Reason exited(int exitCode) {
+      return new Reason("the session exited (exit " + exitCode + ")");
+    }
+  }
+
+  /** The session a launch resumes, or — {@code sessionId} null — why it resumes none. */
+  private record Resume(String sessionId, String whyFresh) {}
 
   private final Spec spec;
   private final SessionKeeper.Desk desk;
@@ -115,6 +148,8 @@ final class SessionLadder {
   private String previousSessionId;
   private Command previousCommand;
   private String refusedResume;
+  private String refusal;
+  private boolean launchedBefore;
   private Integer pendingExitCode;
   private SessionReport.Session lastReport;
 
@@ -216,7 +251,9 @@ final class SessionLadder {
           "%s: the claude.ai token preflight failed (%s); launching anyway",
           spec.label(), e.getClass().getSimpleName());
     }
-    String resume = resumableSession();
+    Resume resumable = resumableSession();
+    String resume = resumable.sessionId();
+    Reason reason = reason();
     Command command;
     try {
       command = desk.launch(spec.request(resume, overlay));
@@ -233,6 +270,9 @@ final class SessionLadder {
       if (resume != null && resume.equals(spec.preferredResume())) {
         refusedResume = resume;
       }
+      if (resume != null) {
+        refusal = "resume of " + resume + " refused: " + e.getMessage();
+      }
       previousSessionId = null;
       previousCommand = null;
       report(ReportedState.FAILED, null, null, spec.label() + " did not launch: " + e.getMessage());
@@ -243,6 +283,9 @@ final class SessionLadder {
     launchedOverlay = overlay;
     launchedAt = clock.getAsLong();
     stopping = false;
+    boolean first = !launchedBefore;
+    launchedBefore = true;
+    refusal = null;
     if (restarting) {
       restarting = false;
       pendingExitCode = null;
@@ -257,7 +300,20 @@ final class SessionLadder {
     } else {
       LOG.infof("%s launched (command %s)", spec.label(), commandId);
     }
+    if (resume == null && (first || resumable.whyFresh() != null)) {
+      // Only when there was something it could have resumed, or on the first launch: a relaunch
+      // with nothing behind it is a fresh session by definition and says nothing.
+      String why = resumable.whyFresh() == null ? "no previous session" : resumable.whyFresh();
+      String message = spec.label() + " launched fresh: " + why;
+      LOG.info(message);
+      send.accept(new DaemonLog("INFO", message));
+    }
     report(ReportedState.RUNNING, commandId, sessionIdOf(command, resume), null);
+    try {
+      spec.launched(resume, reason);
+    } catch (RuntimeException e) {
+      LOG.warnf("%s: the launch listener failed: %s", spec.label(), e.getMessage());
+    }
     later(this::poll, timing.pollMs());
   }
 
@@ -422,26 +478,47 @@ final class SessionLadder {
   }
 
   /**
-   * The session to resume: the one qits named while its transcript exists and the harness has not
-   * refused it, else the previous session of this ladder while its transcript exists, else null.
+   * Why this launch happens, read before it clears the flags: a restart onto a new credential, an
+   * exit, the first launch of this process, else a session wanted again after a stop.
    */
-  private String resumableSession() {
+  private Reason reason() {
+    if (restarting) {
+      return Reason.CREDENTIAL_CHANGED;
+    }
+    if (pendingExitCode != null) {
+      return Reason.exited(pendingExitCode);
+    }
+    return launchedBefore ? Reason.WANTED_AGAIN : Reason.CONTAINER_RECREATED;
+  }
+
+  /**
+   * The session to resume: the one qits named while its transcript exists and the harness has not
+   * refused it, else the previous session of this ladder while its transcript exists. Else none,
+   * and why: the harness refused the last launch's resume, or a transcript is missing — null when
+   * there was nothing to resume.
+   */
+  private Resume resumableSession() {
+    String missing = null;
     String preferred = spec.preferredResume();
     if (preferred != null && !preferred.isBlank() && !preferred.equals(refusedResume)) {
       Command owner = preferred.equals(previousSessionId) ? previousCommand : null;
       if (transcriptPresent(owner, preferred)) {
-        return preferred;
+        return new Resume(preferred, null);
       }
+      missing = preferred;
     }
-    if (previousSessionId == null) {
-      return null;
+    if (previousSessionId != null) {
+      if (transcriptPresent(previousCommand, previousSessionId)) {
+        return new Resume(previousSessionId, null);
+      }
+      missing = missing == null ? previousSessionId : missing;
+      previousSessionId = null;
+      previousCommand = null;
     }
-    if (transcriptPresent(previousCommand, previousSessionId)) {
-      return previousSessionId;
+    if (refusal != null) {
+      return new Resume(null, refusal);
     }
-    previousSessionId = null;
-    previousCommand = null;
-    return null;
+    return new Resume(null, missing == null ? null : "transcript of " + missing + " missing");
   }
 
   private boolean transcriptPresent(Command command, String sessionId) {

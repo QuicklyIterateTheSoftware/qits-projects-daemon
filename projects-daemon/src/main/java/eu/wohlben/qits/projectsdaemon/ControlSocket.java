@@ -802,6 +802,8 @@ public class ControlSocket {
             SessionKeeper.Scheduler.worker(),
             System::currentTimeMillis);
     frontDeskInbox = inbox;
+    // A resumed desk is told it was interrupted, as one turn the inbox types once it is idle.
+    keeper.promptResumesTo(inbox::prompt);
     if (h != null) {
       h.setActivityListener(inbox::onActivity);
     }

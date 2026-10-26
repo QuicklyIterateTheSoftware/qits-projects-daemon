@@ -493,6 +493,8 @@ class SessionKeeperTest {
 
   @Test
   void theServersResumeIdIsPreferredWhileItsTranscriptExists() {
+    List<String> prompts = new ArrayList<>();
+    frontDesk.promptResumesTo(prompts::add);
     credentialsFor(A);
     startBoth();
     frame(
@@ -505,6 +507,67 @@ class SessionKeeperTest {
     desk.exit(A, 1);
     advance(TIMING.pollMs() + TIMING.initialBackoffMs());
     assertNull(desk.launches.getLast().resumeSessionId(), "no transcript, a fresh session");
+    assertTrue(
+        logs().getLast().message().endsWith(
+            "launched fresh: transcript of 11111111-1111-1111-1111-111111111111 missing"),
+        logs().getLast().message());
+    assertTrue(prompts.isEmpty(), "a refinement is never told it was interrupted");
+  }
+
+  /**
+   * The desk's first launch in this daemon process resumes the session qits named: the container
+   * was recreated, and that one turn goes to the desk's inbox — the reason for each later resume
+   * likewise.
+   */
+  @Test
+  void aFrontDeskResumingTheNamedSessionIsToldTheContainerWasRecreated() {
+    List<String> prompts = new ArrayList<>();
+    frontDesk.promptResumesTo(prompts::add);
+    credentialsFor(SessionCredentials.FRONT_DESK_KEY);
+    startBoth();
+    String named = "33333333-3333-3333-3333-333333333333";
+    frame(
+        new Sessions.Session(
+            SessionCredentials.FRONT_DESK_KEY, "project.work", "RUNNING", named, null));
+
+    assertEquals(named, desk.launches.getFirst().resumeSessionId());
+    assertEquals(List.of(interrupted("the desk container was recreated")), prompts);
+    assertTrue(logs().isEmpty(), "a resumed launch has no fresh-launch reason to log");
+
+    desk.exit(SessionCredentials.FRONT_DESK_KEY, 3);
+    advance(TIMING.pollMs() + TIMING.initialBackoffMs());
+    assertEquals(named, desk.launches.getLast().resumeSessionId());
+    assertEquals(interrupted("the session exited (exit 3)"), prompts.getLast());
+    assertEquals(2, prompts.size());
+  }
+
+  /** A fresh first launch of the desk types nothing and logs why it resumed nothing. */
+  @Test
+  void aFreshFrontDeskIsToldNothingAndLogsWhy() {
+    List<String> prompts = new ArrayList<>();
+    frontDesk.promptResumesTo(prompts::add);
+    credentialsFor(SessionCredentials.FRONT_DESK_KEY);
+    startBoth();
+    frame(
+        new Sessions.Session(
+            SessionCredentials.FRONT_DESK_KEY, "project.work", "RUNNING", null, null));
+
+    assertEquals(1, desk.launches.size());
+    assertNull(desk.launches.getFirst().resumeSessionId());
+    assertTrue(prompts.isEmpty());
+    assertEquals(
+        List.of(new DaemonLog("INFO", "front desk launched fresh: no previous session")), logs());
+  }
+
+  private List<DaemonLog> logs() {
+    return sent.stream().filter(DaemonLog.class::isInstance).map(DaemonLog.class::cast).toList();
+  }
+
+  private static String interrupted(String reason) {
+    return "You were interrupted (reason: "
+        + reason
+        + "). Re-read /tmp/qits-delivery-brief.md, it may have changed, then carry on where you"
+        + " stopped.";
   }
 
   @Test
