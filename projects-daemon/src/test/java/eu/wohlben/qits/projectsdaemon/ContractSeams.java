@@ -173,19 +173,4 @@ public final class ContractSeams {
     }
     return new RunningApi(vertx, api);
   }
-
-  /**
-   * What {@link ControlSocket} mints for {@code audience} from a commissioned client: the exact
-   * {@code POST <tokenUrl>} the dial-home and the boot clone make, and the {@code Authorization}
-   * value it turns the answer into.
-   */
-  public static Optional<String> mint(
-      String tokenUrl, String clientId, String clientSecret, String audience) throws Exception {
-    ControlSocket socket = new ControlSocket();
-    socket.token = Optional.empty();
-    socket.commissionedClientId = Optional.of(clientId);
-    socket.commissionedClientSecret = Optional.of(clientSecret);
-    socket.authTokenUrl = Optional.of(tokenUrl);
-    return socket.authorization(Optional.of(audience)).get(20, TimeUnit.SECONDS);
-  }
 }

@@ -35,10 +35,10 @@ import java.util.function.Consumer;
  * API never waits on a subprocess. Starting it can never throw out of the boot worker: this
  * process is PID 1's child and nothing may take the container down.
  *
- * <h2>The child's environment, and why four names are not optional decoration</h2>
+ * <h2>The child's environment, and why two names are not optional decoration</h2>
  *
- * The child inherits the daemon's environment, which already carries {@code
- * QITS_COMMISSIONED_CLIENT_ID}/{@code _SECRET} — that is how the CLI signs itself in. Four more
+ * The child inherits the daemon's environment, which already carries {@code QITS_TOKEN} — that is
+ * how both the CLI and the git credential helper it shells out to answer qits-githost. Two more
  * names are added, and each one <b>only when the inherited environment does not already carry a
  * non-blank value</b>: a container-wide injection is a deployment's decision and must win over an
  * opinion derived in here.
@@ -50,12 +50,11 @@ import java.util.function.Consumer;
  *   <li>{@code QITS_GIT_AUTH_HOST} — the <em>authority</em> of the git base ({@code host[:port]},
  *       no scheme and no path). The CLI's {@code Checkout.requireCredentialHelper} refuses
  *       in-platform with exit code 2 unless this names the origin's host, so handing it the whole
- *       base url would be the same as handing it nothing.
- *   <li>{@code QITS_GIT_AUTH_TOKEN_URL} and {@code QITS_GIT_AUTH_AUDIENCE} — verbatim, so the
- *       helper can mint a qits-githost token with the same client pair the daemon dials home with.
+ *       base url would be the same as handing it nothing. The helper reads it to answer for exactly
+ *       one host, with {@code QITS_TOKEN} as the credential it answers with.
  * </ul>
  *
- * None of these is dead weight; removing one turns a working checkout into a fetch that cannot
+ * Neither is dead weight; removing one turns a working checkout into a fetch that cannot
  * authenticate, and the symptom surfaces a long way from the deletion.
  *
  * <h2>Supervision policy</h2>
@@ -117,8 +116,6 @@ public final class CheckoutFollower {
   private final boolean enabled;
   private final String binary;
   private final String gitBase;
-  private final String authTokenUrl;
-  private final String gitAuthAudience;
   private final long backoffInitialMs;
   private final long backoffMaxMs;
   private final long runResetMs;
@@ -140,8 +137,6 @@ public final class CheckoutFollower {
    * @param binary the CLI to run, {@link #DEFAULT_BINARY} in production
    * @param gitBase {@code qits.projects-daemon.git-base}; its <em>authority</em> becomes {@code
    *     QITS_GIT_AUTH_HOST}
-   * @param authTokenUrl {@code qits.projects-daemon.auth-token-url}, passed verbatim
-   * @param gitAuthAudience {@code qits.projects-daemon.git-auth-audience}, passed verbatim
    * @param backoffInitialMs the first restart delay, doubling per consecutive failure
    * @param backoffMaxMs the cap that doubling stops at
    * @param runResetMs how long a run has to last to count as "it was up", clearing the counter
@@ -153,8 +148,6 @@ public final class CheckoutFollower {
       boolean enabled,
       String binary,
       String gitBase,
-      String authTokenUrl,
-      String gitAuthAudience,
       long backoffInitialMs,
       long backoffMaxMs,
       long runResetMs,
@@ -164,8 +157,6 @@ public final class CheckoutFollower {
     this.enabled = enabled;
     this.binary = binary == null || binary.isBlank() ? DEFAULT_BINARY : binary.trim();
     this.gitBase = gitBase == null ? "" : gitBase.trim();
-    this.authTokenUrl = authTokenUrl == null ? "" : authTokenUrl.trim();
-    this.gitAuthAudience = gitAuthAudience == null ? "" : gitAuthAudience.trim();
     this.backoffInitialMs = Math.max(1, backoffInitialMs);
     this.backoffMaxMs = Math.max(this.backoffInitialMs, backoffMaxMs);
     this.runResetMs = Math.max(0, runResetMs);
@@ -248,12 +239,10 @@ public final class CheckoutFollower {
    * refusal then names a host nobody configured.
    */
   static Map<String, String> additionalEnvironment(
-      Map<String, String> inherited, String gitBase, String authTokenUrl, String gitAuthAudience) {
+      Map<String, String> inherited, String gitBase) {
     Map<String, String> out = new LinkedHashMap<>();
     deriveIfAbsent(out, inherited, "GIT_CONFIG_GLOBAL", GIT_CONFIG_GLOBAL);
     deriveIfAbsent(out, inherited, "QITS_GIT_AUTH_HOST", authorityOf(gitBase));
-    deriveIfAbsent(out, inherited, "QITS_GIT_AUTH_TOKEN_URL", authTokenUrl);
-    deriveIfAbsent(out, inherited, "QITS_GIT_AUTH_AUDIENCE", gitAuthAudience);
     return out;
   }
 
@@ -299,14 +288,13 @@ public final class CheckoutFollower {
 
   private ProcessBuilder processBuilder() {
     ProcessBuilder builder = new ProcessBuilder(argv());
-    // The default is to inherit, which is the point: QITS_COMMISSIONED_CLIENT_ID/_SECRET are how
-    // the CLI signs in, and nothing here needs to know their values to pass them on.
+    // The default is to inherit, which is the point: QITS_TOKEN is how the CLI signs in, and
+    // nothing here needs to know its value to pass it on.
     Map<String, String> environment = builder.environment();
     // Except the delivery token and the API token (DaemonSecrets). QITS_TOKEN stays: `qits` picks
     // its edge-token mode off it and the git credential helper answers with it.
     DaemonSecrets.scrubDaemon(environment);
-    environment.putAll(
-        additionalEnvironment(environment, gitBase, authTokenUrl, gitAuthAudience));
+    environment.putAll(additionalEnvironment(environment, gitBase));
     return builder;
   }
 

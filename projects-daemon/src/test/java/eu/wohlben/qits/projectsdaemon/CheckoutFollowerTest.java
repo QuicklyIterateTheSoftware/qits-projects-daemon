@@ -37,8 +37,6 @@ import org.junit.jupiter.api.io.TempDir;
 class CheckoutFollowerTest {
 
   private static final String GIT_BASE = "http://dev-qits-githost:8080/git";
-  private static final String TOKEN_URL = "http://qits-idp:8080/realms/qits/token";
-  private static final String GIT_AUDIENCE = "qits-githost-env";
 
   @TempDir Path tempDir;
 
@@ -64,18 +62,15 @@ class CheckoutFollowerTest {
             + " path");
   }
 
-  // ---- the four environment names -----------------------------------------
+  // ---- the two environment names -----------------------------------------
 
   @Test
-  void theFourNamesAreDerivedWhenTheContainerCarriesNone() {
-    Map<String, String> derived =
-        CheckoutFollower.additionalEnvironment(Map.of(), GIT_BASE, TOKEN_URL, GIT_AUDIENCE);
+  void theTwoNamesAreDerivedWhenTheContainerCarriesNone() {
+    Map<String, String> derived = CheckoutFollower.additionalEnvironment(Map.of(), GIT_BASE);
 
     assertEquals("/etc/qits-gitconfig", derived.get("GIT_CONFIG_GLOBAL"));
     assertEquals("dev-qits-githost:8080", derived.get("QITS_GIT_AUTH_HOST"));
-    assertEquals(TOKEN_URL, derived.get("QITS_GIT_AUTH_TOKEN_URL"));
-    assertEquals(GIT_AUDIENCE, derived.get("QITS_GIT_AUTH_AUDIENCE"));
-    assertEquals(4, derived.size(), "and nothing else — the rest of the environment is inherited");
+    assertEquals(2, derived.size(), "and nothing else — the rest of the environment is inherited");
   }
 
   /** A container-wide injection is a deployment's decision; a locally derived opinion is not. */
@@ -84,33 +79,31 @@ class CheckoutFollowerTest {
     Map<String, String> injected =
         Map.of(
             "GIT_CONFIG_GLOBAL", "/etc/other-gitconfig",
-            "QITS_GIT_AUTH_HOST", "other-githost:9090",
-            "QITS_GIT_AUTH_TOKEN_URL", "http://other/token",
-            "QITS_GIT_AUTH_AUDIENCE", "other-audience");
+            "QITS_GIT_AUTH_HOST", "other-githost:9090");
 
     assertTrue(
-        CheckoutFollower.additionalEnvironment(injected, GIT_BASE, TOKEN_URL, GIT_AUDIENCE)
-            .isEmpty(),
+        CheckoutFollower.additionalEnvironment(injected, GIT_BASE).isEmpty(),
         "nothing is overwritten, so the container's own answer is the one the child sees");
   }
 
   @Test
   void aBlankInjectedValueIsNotAnAnswerAndIsDerivedOver() {
     Map<String, String> derived =
-        CheckoutFollower.additionalEnvironment(
-            Map.of("QITS_GIT_AUTH_HOST", "  "), GIT_BASE, TOKEN_URL, GIT_AUDIENCE);
+        CheckoutFollower.additionalEnvironment(Map.of("QITS_GIT_AUTH_HOST", "  "), GIT_BASE);
 
     assertEquals("dev-qits-githost:8080", derived.get("QITS_GIT_AUTH_HOST"));
   }
 
+  /**
+   * The pair is retired: the child authenticates with {@code QITS_TOKEN} alone, so nothing here
+   * ever derives a token endpoint or an audience for it to mint against.
+   */
   @Test
-  void theTwoVerbatimNamesAreOmittedWhenTheConfigIsAbsent() {
-    Map<String, String> derived =
-        CheckoutFollower.additionalEnvironment(Map.of(), GIT_BASE, "", "   ");
+  void noPairNameIsEverDerived() {
+    Map<String, String> derived = CheckoutFollower.additionalEnvironment(Map.of(), GIT_BASE);
 
     assertFalse(derived.containsKey("QITS_GIT_AUTH_TOKEN_URL"));
     assertFalse(derived.containsKey("QITS_GIT_AUTH_AUDIENCE"));
-    assertEquals("dev-qits-githost:8080", derived.get("QITS_GIT_AUTH_HOST"));
   }
 
   /**
@@ -137,8 +130,9 @@ class CheckoutFollowerTest {
   }
 
   /**
-   * The same contract, through a real spawn: all four names reach the child, each carrying the
-   * value the container injected if there was one and the derived value otherwise.
+   * The same contract, through a real spawn: the two names reach the child, each carrying the
+   * value the container injected if there was one and the derived value otherwise — and the
+   * pair's two names reach it only if something outside this class injected them, never derived.
    *
    * <p>The expectation is computed from {@link System#getenv()} rather than written down, because
    * the JVM running this suite may itself be inside a qits container that injects some of these —
@@ -162,15 +156,22 @@ class CheckoutFollowerTest {
         List.of(
             "GIT_CONFIG_GLOBAL=" + expected("GIT_CONFIG_GLOBAL", "/etc/qits-gitconfig"),
             "QITS_GIT_AUTH_HOST=" + expected("QITS_GIT_AUTH_HOST", "dev-qits-githost:8080"),
-            "QITS_GIT_AUTH_TOKEN_URL=" + expected("QITS_GIT_AUTH_TOKEN_URL", TOKEN_URL),
-            "QITS_GIT_AUTH_AUDIENCE=" + expected("QITS_GIT_AUTH_AUDIENCE", GIT_AUDIENCE)),
-        Files.readAllLines(dump));
+            "QITS_GIT_AUTH_TOKEN_URL=" + inheritedOnly("QITS_GIT_AUTH_TOKEN_URL"),
+            "QITS_GIT_AUTH_AUDIENCE=" + inheritedOnly("QITS_GIT_AUTH_AUDIENCE")),
+        Files.readAllLines(dump),
+        "the pair's names are never derived — the child answers qits-githost with QITS_TOKEN alone");
   }
 
   /** What the child must see for {@code name}: the injected value, else the derived one. */
   private static String expected(String name, String derived) {
     String injected = System.getenv(name);
     return injected != null && !injected.isBlank() ? injected : derived;
+  }
+
+  /** What the child must see for a name nothing here derives any more: only what was inherited. */
+  private static String inheritedOnly(String name) {
+    String injected = System.getenv(name);
+    return injected == null ? "" : injected;
   }
 
   // ---- supervision policy --------------------------------------------------
@@ -308,9 +309,7 @@ class CheckoutFollowerTest {
   void theKillSwitchSpawnsNothingAndSaysSo() throws Exception {
     Path runs = tempDir.resolve("runs.out");
     String fake = script("echo run >> '" + runs + "'", "exec sleep 300");
-    follower =
-        new CheckoutFollower(
-            false, fake, GIT_BASE, TOKEN_URL, GIT_AUDIENCE, 10, 20, 300, 3, 500, events::add);
+    follower = new CheckoutFollower(false, fake, GIT_BASE, 10, 20, 300, 3, 500, events::add);
 
     follower.start();
 
@@ -354,8 +353,6 @@ class CheckoutFollowerTest {
     ControlSocket daemon = new ControlSocket();
     daemon.checkoutFollow = false;
     daemon.gitBaseConfig = Optional.of(GIT_BASE);
-    daemon.authTokenUrl = Optional.of(TOKEN_URL);
-    daemon.gitAuthAudience = Optional.of(GIT_AUDIENCE);
     daemon.termGraceMs = 1_000;
     return daemon;
   }
@@ -364,8 +361,7 @@ class CheckoutFollowerTest {
 
   /** The ladder in milliseconds: three runs, a 300 ms reset window, a 10→20 ms backoff. */
   private CheckoutFollower follower(String binary) {
-    return new CheckoutFollower(
-        true, binary, GIT_BASE, TOKEN_URL, GIT_AUDIENCE, 10, 20, 300, 3, 500, events::add);
+    return new CheckoutFollower(true, binary, GIT_BASE, 10, 20, 300, 3, 500, events::add);
   }
 
   private void start(String binary) {
