@@ -197,10 +197,10 @@ class EdgePlaneTest {
   // ---- the checkout follower ----------------------------------------------------
 
   @Test
-  void theFollowerInjectsNoTokenUrlWhenNoneIsSet() {
+  void theFollowerNeverInjectsThePairsNames() {
     Map<String, String> derived =
         CheckoutFollower.additionalEnvironment(
-            Map.of("QITS_TOKEN", TOKEN), "https://git.qits.example.org/git", "", "");
+            Map.of("QITS_TOKEN", TOKEN), "https://git.qits.example.org/git");
 
     assertFalse(derived.containsKey("QITS_GIT_AUTH_TOKEN_URL"), derived.toString());
     assertFalse(derived.containsKey("QITS_GIT_AUTH_AUDIENCE"), derived.toString());

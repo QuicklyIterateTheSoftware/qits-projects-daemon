@@ -577,8 +577,6 @@ public class ControlSocket {
               checkoutFollow,
               CheckoutFollower.DEFAULT_BINARY,
               gitBaseConfig.orElse(""),
-              authTokenUrl.orElse(""),
-              gitAuthAudience.orElse(""),
               CHECKOUT_FOLLOW_BACKOFF_INITIAL_MS,
               CHECKOUT_FOLLOW_BACKOFF_MAX_MS,
               CHECKOUT_FOLLOW_RUN_RESET_MS,
