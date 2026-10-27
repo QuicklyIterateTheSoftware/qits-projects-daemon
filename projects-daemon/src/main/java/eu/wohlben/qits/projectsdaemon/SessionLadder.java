@@ -26,10 +26,11 @@ import org.jboss.logging.Logger;
  *   <li><b>Supervise:</b> on exit, relaunch after a backoff that starts at 5 s and doubles to 5 min,
  *       and resets once a session stayed up for 10 min. It never gives up.
  *   <li><b>Resume</b> while the transcript exists: the id qits named ({@link Spec#preferredResume})
- *       first, else the key's previous session. A resume the harness refused is not tried again.
- *       Every launch carries its {@link Reason}, which {@link Spec#launched} hears with the session
- *       it resumed; a fresh launch says in a {@link DaemonLog} INFO why it resumed nothing, when
- *       there was something to resume or it is the ladder's first.
+ *       first, else the key's previous session — in a new daemon process, the one it recorded
+ *       ({@link Spec#recordedSession}, {@link Spec#recordSession}). A resume the harness refused
+ *       is not tried again. Every launch carries its {@link Reason}, which {@link Spec#launched}
+ *       hears with the session it resumed; a fresh launch says in a {@link DaemonLog} INFO why it
+ *       resumed nothing, when there was something to resume or it is the ladder's first.
  *   <li><b>Fresh token:</b> {@link ClaudeTokenPreflight} before every launch; a failure is logged and
  *       the launch goes ahead.
  *   <li><b>Credential per key</b> ({@link Spec#overlay}): inside the grace window it waits quietly;
@@ -98,6 +99,21 @@ final class SessionLadder {
      * resumed, null when it is fresh, and {@code reason} why it happened. Must not throw.
      */
     default void launched(String resumedSessionId, Reason reason) {}
+
+    /**
+     * The session this key recorded in an earlier daemon process, or null — read once, at the
+     * ladder's first attempt, as its previous session. Only the front desk keeps a record ({@link
+     * FrontDeskSessionRecord}). Must not throw.
+     */
+    default String recordedSession() {
+      return null;
+    }
+
+    /**
+     * The running session's id, whenever the ladder learns it: after a launch, and on the polls
+     * once the SessionStart hook reported it. Must not throw.
+     */
+    default void recordSession(String sessionId) {}
   }
 
   /**
@@ -109,8 +125,12 @@ final class SessionLadder {
     /** {@link Spec#restartsOnCredentialChange}: the session was restarted onto a new credential. */
     static final Reason CREDENTIAL_CHANGED = new Reason("its session credential changed");
 
-    /** The first launch of this daemon process: whatever ran before ran in another container. */
-    static final Reason CONTAINER_RECREATED = new Reason("the desk container was recreated");
+    /**
+     * The first launch of this daemon process: whatever ran before ran in an earlier process — the
+     * same container restarted, or another one.
+     */
+    static final Reason CONTAINER_RECREATED =
+        new Reason("the desk container was restarted or recreated");
 
     /** The session was stopped (no longer wanted) and is wanted again. */
     static final Reason WANTED_AGAIN = new Reason("the session was stopped and is wanted again");
@@ -150,6 +170,7 @@ final class SessionLadder {
   private String refusedResume;
   private String refusal;
   private boolean launchedBefore;
+  private boolean seeded;
   private Integer pendingExitCode;
   private SessionReport.Session lastReport;
 
@@ -251,6 +272,7 @@ final class SessionLadder {
           "%s: the claude.ai token preflight failed (%s); launching anyway",
           spec.label(), e.getClass().getSimpleName());
     }
+    seedFromRecord();
     Resume resumable = resumableSession();
     String resume = resumable.sessionId();
     Reason reason = reason();
@@ -308,7 +330,7 @@ final class SessionLadder {
       LOG.info(message);
       send.accept(new DaemonLog("INFO", message));
     }
-    report(ReportedState.RUNNING, commandId, sessionIdOf(command, resume), null);
+    running(sessionIdOf(command, resume), null);
     try {
       spec.launched(resume, reason);
     } catch (RuntimeException e) {
@@ -353,11 +375,7 @@ final class SessionLadder {
       }
       // The session id lands with the harness's SessionStart hook, after the launch: report it once
       // it is known, so qits can name it as the resume of a later launch.
-      report(
-          ReportedState.RUNNING,
-          commandId,
-          sessionIdOf(current.get(), null),
-          stopping ? "stopping" : null);
+      running(sessionIdOf(current.get(), null), stopping ? "stopping" : null);
       later(this::poll, timing.pollMs());
       return;
     }
@@ -447,6 +465,43 @@ final class SessionLadder {
       report.accept(next);
     } catch (RuntimeException e) {
       LOG.debugf("Could not report %s: %s", spec.key(), e.getMessage());
+    }
+  }
+
+  /** Report the running session, and record its id once it is known. */
+  private void running(String sessionId, String detail) {
+    report(ReportedState.RUNNING, commandId, sessionId, detail);
+    if (sessionId != null) {
+      try {
+        spec.recordSession(sessionId);
+      } catch (RuntimeException e) {
+        LOG.debugf("%s: could not record session %s: %s", spec.label(), sessionId, e.getMessage());
+      }
+    }
+  }
+
+  /**
+   * Once, before the first launch: the session an earlier daemon process recorded becomes the
+   * previous session when this ladder has none, resumable only while its transcript exists — qits'
+   * preferred id still comes first. A container restarted while qits could not store the id
+   * resumes it all the same.
+   */
+  private void seedFromRecord() {
+    if (seeded) {
+      return;
+    }
+    seeded = true;
+    if (previousSessionId != null) {
+      return;
+    }
+    try {
+      String recorded = spec.recordedSession();
+      if (recorded != null && !recorded.isBlank()) {
+        previousSessionId = recorded;
+        previousCommand = null;
+      }
+    } catch (RuntimeException e) {
+      LOG.debugf("%s: could not read its recorded session: %s", spec.label(), e.getMessage());
     }
   }
 

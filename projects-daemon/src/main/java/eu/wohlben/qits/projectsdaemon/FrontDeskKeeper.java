@@ -54,10 +54,11 @@ import org.jboss.logging.Logger;
  *       starts at 5 s and doubles to 5 min, and resets once a session stayed up for 10 min. It never
  *       gives up: a desk that stops coming back is the failure this class exists to remove.
  *   <li><b>Resume:</b> a relaunch continues the previous keeper session while its transcript still
- *       exists, so the remote-control thread survives a crash of its process. A resumed desk is
- *       told it was interrupted, and why, in one turn through {@link FrontDeskInbox} ({@link
- *       #promptResumesTo}) — typed once the new session is idle, never over a person's draft. A
- *       fresh one is told nothing.
+ *       exists, so the remote-control thread survives a crash of its process — and, through the id
+ *       {@link FrontDeskSessionRecord} keeps on the claude volume, a restart of its container that
+ *       qits could not record (the 2026-10-27 outage). A resumed desk is told it was interrupted,
+ *       and why, in one turn through {@link FrontDeskInbox} ({@link #promptResumesTo}) — typed once
+ *       the new session is idle, never over a person's draft. A fresh one is told nothing.
  *   <li><b>Fresh token:</b> before every launch the claude.ai access token on the credential
  *       volume is refreshed through {@code claude} itself when it is missing, unreadable or within
  *       5 min of expiry ({@link ClaudeTokenPreflight}), because Remote Control connects only at
@@ -196,6 +197,7 @@ final class FrontDeskKeeper {
   private final FrontDeskCredential credential;
   private final Desk desk;
   private final Scheduler scheduler;
+  private final FrontDeskSessionRecord record;
   private final SessionLadder ladder;
 
   /** Where the interrupted turn of a resumed desk goes; nowhere until {@link #promptResumesTo}. */
@@ -236,8 +238,33 @@ final class FrontDeskKeeper {
       Scheduler scheduler,
       LongSupplier clock,
       Consumer<DaemonMessage> send) {
+    this(
+        lifecycle,
+        credential,
+        desk,
+        timing,
+        scheduler,
+        clock,
+        send,
+        FrontDeskSessionRecord.NONE);
+  }
+
+  /**
+   * The keeper whose ladder keeps the desk's session id in {@code record}, and resumes it in a new
+   * daemon process when qits names none.
+   */
+  FrontDeskKeeper(
+      Lifecycle lifecycle,
+      FrontDeskCredential credential,
+      Desk desk,
+      Timing timing,
+      Scheduler scheduler,
+      LongSupplier clock,
+      Consumer<DaemonMessage> send,
+      FrontDeskSessionRecord record) {
     this.lifecycle = lifecycle;
     this.credential = credential;
+    this.record = record == null ? FrontDeskSessionRecord.NONE : record;
     this.desk = desk;
     this.scheduler = scheduler;
     this.ladder =
@@ -431,6 +458,16 @@ final class FrontDeskKeeper {
       if (resumedSessionId != null) {
         inbox.accept(interruptedPrompt(reason));
       }
+    }
+
+    @Override
+    public String recordedSession() {
+      return record.read();
+    }
+
+    @Override
+    public void recordSession(String sessionId) {
+      record.write(sessionId);
     }
   }
 

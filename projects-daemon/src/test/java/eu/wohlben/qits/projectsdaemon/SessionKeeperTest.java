@@ -20,6 +20,8 @@ import eu.wohlben.qits.projectsdaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.projectsdaemon.protocol.SessionCredentials;
 import eu.wohlben.qits.projectsdaemon.protocol.SessionReport;
 import eu.wohlben.qits.projectsdaemon.protocol.Sessions;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -30,7 +32,9 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.PriorityQueue;
 import java.util.UUID;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * {@link SessionKeeper} — the session multiplex — against a faked harness and a virtual clock: one
@@ -531,7 +535,7 @@ class SessionKeeperTest {
             SessionCredentials.FRONT_DESK_KEY, "project.work", "RUNNING", named, null));
 
     assertEquals(named, desk.launches.getFirst().resumeSessionId());
-    assertEquals(List.of(interrupted("the desk container was recreated")), prompts);
+    assertEquals(List.of(interrupted("the desk container was restarted or recreated")), prompts);
     assertTrue(logs().isEmpty(), "a resumed launch has no fresh-launch reason to log");
 
     desk.exit(SessionCredentials.FRONT_DESK_KEY, 3);
@@ -568,6 +572,56 @@ class SessionKeeperTest {
         + reason
         + "). Re-read /tmp/qits-delivery-brief.md, it may have changed, then carry on where you"
         + " stopped.";
+  }
+
+  /**
+   * Only the front desk keeps a record on the claude volume (qits-1619): a refinement key neither
+   * resumes the recorded session nor writes its own over it.
+   */
+  @Test
+  void refinementLaddersNeitherReadNorWriteTheRecord(@TempDir Path mount) throws Exception {
+    String recorded = "66666666-6666-6666-6666-666666666666";
+    FrontDeskSessionRecord record = FrontDeskSessionRecord.of(mount.toString(), "p-1");
+    Files.createDirectories(record.path().getParent());
+    Files.writeString(record.path(), recorded + "\n");
+    FrontDeskKeeper recordingDesk =
+        new FrontDeskKeeper(
+            Lifecycle.ON_DEMAND,
+            new FrontDeskCredential(DeliveryKeeper.Settings.OFF, credentials),
+            desk,
+            TIMING,
+            scheduler,
+            () -> now,
+            sent::add,
+            record);
+    SessionKeeper multiplex =
+        new SessionKeeper(
+            recordingDesk, credentials, desk, TIMING, scheduler, () -> now, sent::add);
+    credentialsFor(SessionCredentials.FRONT_DESK_KEY, A);
+    recordingDesk.start();
+    multiplex.start();
+    multiplex.apply(
+        new Sessions(
+            List.of(
+                new Sessions.Session(
+                    SessionCredentials.FRONT_DESK_KEY, "project.work", "RUNNING", null, null),
+                refinement(A, "RUNNING", entity("qits-1", "REPORTED")))));
+    advance(0);
+
+    assertNull(desk.launchesFor(A).getFirst().resumeSessionId(), "the desk's record is not A's");
+    assertEquals(
+        recorded,
+        desk.running(SessionCredentials.FRONT_DESK_KEY).orElseThrow().currentSession().sessionId(),
+        "the desk resumed it");
+
+    desk.exit(A, 1);
+    advance(TIMING.pollMs() + TIMING.initialBackoffMs() + TIMING.pollMs() * 3);
+    assertEquals(2, desk.launchesFor(A).size());
+    assertEquals(
+        recorded, Files.readString(record.path()).strip(), "A's sessions are not recorded");
+    try (Stream<Path> files = Files.list(record.path().getParent())) {
+      assertEquals(List.of(record.path()), files.toList(), "and no record of A's own");
+    }
   }
 
   @Test

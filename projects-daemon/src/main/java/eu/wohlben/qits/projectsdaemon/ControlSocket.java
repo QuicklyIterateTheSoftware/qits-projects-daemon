@@ -762,7 +762,9 @@ public class ControlSocket {
             SessionKeeper.Timing.DEFAULT,
             SessionKeeper.Scheduler.worker(),
             System::currentTimeMillis,
-            this::send);
+            this::send,
+            // On the claude volume: a restarted container resumes a desk qits could not record.
+            FrontDeskSessionRecord.of(claudeMount, projectId));
     frontDesk = keeper;
     // Every other session key qits asks for (qits-770), on a worker of its own; the front desk's
     // ladder stays on the keeper's.

@@ -24,6 +24,8 @@ import eu.wohlben.qits.projectsdaemon.protocol.SessionCredentials;
 import eu.wohlben.qits.projectsdaemon.protocol.Sessions;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -32,6 +34,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.PriorityQueue;
 import java.util.UUID;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -711,7 +714,161 @@ class FrontDeskKeeperTest {
     activity.put(kept, "IDLE");
     inbox.onActivity(kept, "IDLE"); // its SessionStart
     advance(0);
-    assertEquals(List.of(interrupted("the desk container was recreated")), typed);
+    assertEquals(List.of(interrupted("the desk container was restarted or recreated")), typed);
+  }
+
+  // --- the session record on the claude volume (qits-1619) -------------------------------------
+
+  private static final String RECORDED = "44444444-4444-4444-4444-444444444444";
+
+  /** A keeper over the scrubbed credential that keeps its session id in {@code record}. */
+  private FrontDeskKeeper recording(FrontDeskSessionRecord record) {
+    return new FrontDeskKeeper(
+        Lifecycle.ON_DEMAND,
+        FrontDeskCredential.SCRUBBED,
+        desk,
+        TIMING,
+        scheduler,
+        () -> now,
+        sent::add,
+        record);
+  }
+
+  /** qits' {@code front-desk} entry, RUNNING, naming {@code resume} (null: none). */
+  private static Sessions.Session frontDeskEntry(String resume) {
+    return new Sessions.Session(
+        SessionCredentials.FRONT_DESK_KEY, "project.work", "RUNNING", resume, null);
+  }
+
+  private static FrontDeskSessionRecord recorded(Path mount, String sessionId) throws Exception {
+    FrontDeskSessionRecord record = FrontDeskSessionRecord.of(mount.toString(), "p-1");
+    Files.createDirectories(record.path().getParent());
+    Files.writeString(record.path(), sessionId + "\n");
+    return record;
+  }
+
+  private static String contentOf(FrontDeskSessionRecord record) throws Exception {
+    return Files.readString(record.path()).strip();
+  }
+
+  /**
+   * The 2026-10-27 outage: the container restarted while qits' database was down, so qits names no
+   * resume and the new daemon process remembers nothing — the record on the claude volume does.
+   */
+  @Test
+  void aRestartedDaemonResumesTheRecordedSessionWhenQitsNamesNone(@TempDir Path mount)
+      throws Exception {
+    FrontDeskSessionRecord record = recorded(mount, RECORDED);
+    assertEquals(
+        mount.resolve(".qits/front-desk/p-1.session"), record.path(), "per project, on the volume");
+    FrontDeskKeeper keeper = recording(record);
+    keeper.promptResumesTo(prompts::add);
+    keeper.start();
+    keeper.desire(frontDeskEntry(null));
+    advance(0);
+
+    assertEquals(1, desk.launches.size());
+    assertEquals(RECORDED, desk.launches.getFirst().resumeSessionId());
+    assertEquals(List.of(interrupted("the desk container was restarted or recreated")), prompts);
+    assertTrue(
+        logs().stream().noneMatch(log -> log.message().contains("launched fresh")),
+        "a resumed launch has nothing to explain");
+    assertEquals(RECORDED, contentOf(record));
+  }
+
+  @Test
+  void theRecordFollowsTheRunningSessionAndIsRewrittenOnlyWhenItChanges(@TempDir Path mount)
+      throws Exception {
+    FrontDeskSessionRecord record = FrontDeskSessionRecord.of(mount.toString(), "p-1");
+    FrontDeskKeeper keeper = recording(record);
+    keeper.start();
+    keeper.desire(frontDeskEntry(null));
+    advance(0);
+    String launched = desk.lastRunning().currentSession().sessionId();
+    assertEquals(launched, contentOf(record), "written with the launched session's id");
+    assertEquals(
+        PosixFilePermissions.fromString("rw-r--r--"),
+        Files.getPosixFilePermissions(record.path()));
+
+    // Polls reporting the same id leave the file alone.
+    FileTime old = FileTime.fromMillis(0);
+    Files.setLastModifiedTime(record.path(), old);
+    advance(TIMING.pollMs() * 5);
+    assertEquals(old, Files.getLastModifiedTime(record.path()), "an unchanged id is not rewritten");
+
+    // The harness moved the running command onto another session (its SessionStart hook reported
+    // it): the next poll records that one.
+    String next = UUID.randomUUID().toString();
+    Command running = desk.lastRunning();
+    desk.commands.put(
+        running.id(),
+        running.withSession(
+            new AgentSessionRef(
+                next, AgentSessionSource.PINNED, null, null, Instant.ofEpochMilli(now))));
+    advance(TIMING.pollMs());
+    assertEquals(next, contentOf(record), "updated when the reported id changes");
+    try (Stream<Path> files = Files.list(record.path().getParent())) {
+      assertEquals(List.of(record.path()), files.toList(), "no temp file left behind");
+    }
+  }
+
+  @Test
+  void aRecordedSessionWithoutItsTranscriptLaunchesFreshAndSaysWhy(@TempDir Path mount)
+      throws Exception {
+    FrontDeskSessionRecord record = recorded(mount, RECORDED);
+    desk.transcriptPresent = false;
+    FrontDeskKeeper keeper = recording(record);
+    keeper.promptResumesTo(prompts::add);
+    keeper.start();
+    keeper.desire(frontDeskEntry(null));
+    advance(0);
+
+    assertEquals(1, desk.launches.size());
+    assertNull(desk.launches.getFirst().resumeSessionId(), "no transcript, no resume");
+    assertTrue(prompts.isEmpty(), "a fresh desk is told nothing");
+    assertEquals(
+        List.of(
+            new DaemonLog(
+                "INFO", "front desk launched fresh: transcript of " + RECORDED + " missing")),
+        logs());
+    assertEquals(
+        desk.lastRunning().currentSession().sessionId(),
+        contentOf(record),
+        "the fresh session replaces the record");
+  }
+
+  @Test
+  void qitsPreferredResumeWinsOverTheRecord(@TempDir Path mount) throws Exception {
+    String named = "55555555-5555-5555-5555-555555555555";
+    FrontDeskSessionRecord record = recorded(mount, RECORDED);
+    FrontDeskKeeper keeper = recording(record);
+    keeper.start();
+    keeper.desire(frontDeskEntry(named));
+    advance(0);
+
+    assertEquals(named, desk.launches.getFirst().resumeSessionId(), "both transcripts exist");
+    assertEquals(named, contentOf(record), "and the record follows the session that runs");
+  }
+
+  @Test
+  void aRecordThatCannotBeWrittenOrReadNeverThrows(@TempDir Path mount) throws Exception {
+    Files.writeString(mount.resolve(".qits"), "a file where the directory should be");
+    FrontDeskSessionRecord record = FrontDeskSessionRecord.of(mount.toString(), "p-1");
+    record.write(RECORDED);
+    record.write(RECORDED + "x");
+    assertNull(record.read());
+    assertNull(FrontDeskSessionRecord.of(mount.toString(), "").path(), "no project, no record");
+    assertNull(FrontDeskSessionRecord.of(mount.toString(), "../p-1").path(), "one path segment");
+    assertNull(FrontDeskSessionRecord.of("", "p-1").path(), "no mount, no record");
+    assertNull(FrontDeskSessionRecord.NONE.read());
+
+    // The keeper launches all the same, fresh.
+    FrontDeskKeeper keeper = recording(record);
+    keeper.start();
+    keeper.desire(frontDeskEntry(null));
+    advance(0);
+    assertEquals(1, desk.launches.size());
+    assertNull(desk.launches.getFirst().resumeSessionId());
   }
 
   @Test

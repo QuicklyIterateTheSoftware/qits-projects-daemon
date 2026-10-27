@@ -50,6 +50,9 @@ library declares:
                             frame, the front desk's being FrontDeskKeeper's; answers with `sessionReport`
     SessionLadder           one key's keep-it-running ladder — launch, backoff, resume, preflight, fail-closed
                             credential, stop — written once; FrontDeskKeeper and every entity key climb it
+    FrontDeskSessionRecord  the desk's current session id on the claude volume, at
+                            <claudeMount>/.qits/front-desk/<projectId>.session, so a new daemon
+                            process resumes it when qits could not store the id
     FrontDeskCredential     the one seam deciding the front desk launch's credential: the `front-desk` session
                             credential once qits sent any; before that (legacy) the delivery token as
                             QITS_TOKEN while delivering, the container's own token otherwise
