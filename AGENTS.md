@@ -403,15 +403,11 @@ derive fails at the boundary instead of far from it.
     QITS_PROJECTS_DAEMON_API_PORT        default 13338
     QITS_PROJECTS_DAEMON_HOOKS_PORT      default 13337
     QITS_PROJECTS_DAEMON_CLAUDE_MOUNT    shared credential volume, default /claude-home
-    QITS_PROJECTS_DAEMON_AUTH_TOKEN_URL  idp token endpoint for authenticated dial-home
-    QITS_PROJECTS_DAEMON_AUTH_AUDIENCE   qits-projects' environment client id
-    QITS_PROJECTS_DAEMON_GIT_AUTH_AUDIENCE qits-githost's environment client id
     QITS_PLATFORM_MCP_URL                the central qits platform MCP server, the one a launch attaches; absent ⇒ none, NOTHING derived
-    QITS_COMMISSIONED_CLIENT_ID          this container's idp client; absent ⇒ anonymous dev dial
-    QITS_COMMISSIONED_CLIENT_SECRET      its one-time secret
-    QITS_TOKEN                           runner-placed (edge) container's project token; set ⇒ it is the bearer on the
-                                         control socket, every dial-back, the clone's git header and the qits
-                                         MCP server, and NOTHING is minted; absent ⇒ the pair above (client_secret_post).
+    QITS_TOKEN                           runner-placed (edge) container's project token, and this daemon's ONLY dial-home
+                                         credential; set ⇒ it is the bearer on the control socket, every dial-back, the
+                                         clone's git header and the qits MCP server, and NOTHING is minted; absent ⇒ every
+                                         one of those dials anonymously (qits-876 retired the commissioned-pair fallback).
                                          The daemon's own: its git/maintenance children keep it, no session inherits it
                                          (DaemonSecrets) — a session runs on its own credential, see below
     QITS_TOKEN_SUBJECT                   whom that token names; read for the boot log only
@@ -474,8 +470,8 @@ loses it.
 
 The daemon's own git and maintenance processes keep `QITS_TOKEN` because they need it: the base
 image's `/usr/local/bin/qits-git-credential` (named by `/etc/qits-gitconfig`) answers qits-githost with
-`QITS_TOKEN` when set — a desk carries no commissioned pair to fall back on — and `qits
-checkout-daemon` picks its edge-token mode off the same name.
+`QITS_TOKEN` when set — it is this daemon's only dial-home credential, with no commissioned pair to
+fall back on (qits-876) — and `qits checkout-daemon` picks its edge-token mode off the same name.
 
 **Per-session credentials ride the control socket** (`sessionCredentials`, capability 2). qits sends
 the full list — `[{key, token, subject}]` — on `hello` and on every change; the daemon holds it in

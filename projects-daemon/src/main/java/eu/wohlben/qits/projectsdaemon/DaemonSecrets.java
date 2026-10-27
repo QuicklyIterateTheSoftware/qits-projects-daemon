@@ -59,8 +59,9 @@ import java.util.Optional;
  *       <b>keep</b> {@code QITS_TOKEN} ({@link #scrubDaemon(Map)}). They act as the container, and
  *       they need to: the base image's git credential helper ({@code /usr/local/bin/qits-git-credential},
  *       named by {@code /etc/qits-gitconfig}) answers qits-githost with {@code QITS_TOKEN} when it is
- *       set — a desk carries no commissioned pair to fall back on — and the {@code qits} CLI the
- *       follower runs picks its edge-token mode off the same name.
+ *       set — this daemon's only dial-home credential, with no commissioned pair to fall back on
+ *       (qits-876) — and the {@code qits} CLI the follower runs picks its edge-token mode off the
+ *       same name.
  *   <li><b>what the library spawns without a request</b> — the sign-in terminal, the auth and
  *       capability probes, the token preflight — goes through {@link #commands} and {@link
  *       #processes}, which blank all five on the way in unless the launch already decided them.

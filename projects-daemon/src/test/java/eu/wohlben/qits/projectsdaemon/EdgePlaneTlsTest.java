@@ -3,7 +3,6 @@ package eu.wohlben.qits.projectsdaemon;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.sun.net.httpserver.HttpServer;
 import io.vertx.core.Context;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
@@ -16,7 +15,6 @@ import io.vertx.core.http.ServerWebSocket;
 import io.vertx.core.http.WebSocket;
 import io.vertx.core.http.WebSocketClient;
 import io.vertx.core.net.PfxOptions;
-import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -34,10 +32,10 @@ import org.junit.jupiter.api.io.TempDir;
 /**
  * The edge in miniature, end to end: a TLS WebSocket server with a self-signed certificate for a
  * dotted host plays {@code projects.qits.<domain>}, and the daemon's two dials — the control socket
- * (its own options, on a client built as {@link ControlSocket} builds it, with the authorization
- * {@link ControlSocket#authorization()} answers) and a dial-back through the real {@link
- * DaemonStreamTunnel} wired to {@link ControlSocket#dialBackAuthorization()} — must both complete a
- * verified TLS handshake and both carry the same bearer.
+ * (its own options, on a client built as {@link ControlSocket} builds it, with the {@link
+ * ControlSocket#bearer()} answers) and a dial-back through the real {@link DaemonStreamTunnel}
+ * wired to {@link ControlSocket#dialBackAuthorization()} — must both complete a verified TLS
+ * handshake and both carry the same bearer, or both dial anonymously when there is none.
  *
  * <p>The certificate is trusted only through a test trust store installed as the JVM default, which
  * is the same default trust store the daemon relies on against the edge's public certificate, so
@@ -143,11 +141,6 @@ class EdgePlaneTlsTest {
   void withTheTokenBothDialsCarryItOverTls() throws Exception {
     ControlSocket socket = new ControlSocket();
     socket.token = Optional.of("qits_tok_test");
-    // A pair is configured too, pointing nowhere: the token must win without a mint being tried.
-    socket.commissionedClientId = Optional.of("dyn-agent");
-    socket.commissionedClientSecret = Optional.of("one-time-secret");
-    socket.authTokenUrl = Optional.of("http://127.0.0.1:1/idp/token");
-    socket.authAudience = Optional.of("dev-qits-projects");
 
     dialBoth(socket);
 
@@ -155,35 +148,20 @@ class EdgePlaneTlsTest {
     assertEquals(List.of(CONTROL_PATH + auth, STREAM_PATH + auth), seen);
   }
 
+  /**
+   * Deliberate, not a gap: the clone-alone/developer topology dials both the control socket and
+   * every dial-back with no credential at all. Who may open a control socket is the host's
+   * decision, not this daemon's.
+   */
   @Test
-  void withoutTheTokenTheDialBackCarriesTheMintedBearer() throws Exception {
-    HttpServer idp = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-    idp.createContext(
-        "/idp/token",
-        exchange -> {
-          exchange.getRequestBody().readAllBytes();
-          byte[] answer = "{\"access_token\":\"machine-token\"}".getBytes(StandardCharsets.UTF_8);
-          exchange.sendResponseHeaders(200, answer.length);
-          exchange.getResponseBody().write(answer);
-          exchange.close();
-        });
-    idp.start();
-    try {
-      ControlSocket socket = new ControlSocket();
-      socket.token = Optional.empty();
-      socket.commissionedClientId = Optional.of("dyn-agent");
-      socket.commissionedClientSecret = Optional.of("one-time-secret");
-      socket.authTokenUrl =
-          Optional.of("http://127.0.0.1:" + idp.getAddress().getPort() + "/idp/token");
-      socket.authAudience = Optional.of("dev-qits-projects");
+  void withoutTheTokenBothDialsAreAnonymousOverTls() throws Exception {
+    ControlSocket socket = new ControlSocket();
+    socket.token = Optional.empty();
 
-      dialBoth(socket);
+    dialBoth(socket);
 
-      String auth = " sni=" + EDGE_HOST + " auth=Bearer machine-token";
-      assertEquals(List.of(CONTROL_PATH + auth, STREAM_PATH + auth), seen);
-    } finally {
-      idp.stop(0);
-    }
+    String auth = " sni=" + EDGE_HOST + " auth=null";
+    assertEquals(List.of(CONTROL_PATH + auth, STREAM_PATH + auth), seen);
   }
 
   /**
@@ -192,7 +170,7 @@ class EdgePlaneTlsTest {
    */
   private void dialBoth(ControlSocket socket) throws Exception {
     String socketUrl = "wss://" + EDGE_HOST + ":" + edge.actualPort() + CONTROL_PATH;
-    Optional<String> authorization = socket.authorization().get(10, TimeUnit.SECONDS);
+    Optional<String> authorization = socket.bearer();
 
     control = vertx.createWebSocketClient(DaemonDial.clientOptions());
     Promise<WebSocket> connected = Promise.promise();

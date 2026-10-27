@@ -49,15 +49,12 @@
              carrying neither key would have been guessed. -->
         <qits-coding-agents.version>2026.1026.133437</qits-coding-agents.version>
 
-        <!-- pact-jvm, for the contract tests (ticket qits-1149): the version every provider and
-             consumer on the estate uses, so a pact is read the same way on both sides. -->
+        <!-- pact-jvm, for the contract tests (ticket qits-1149): ConsumerPactVerificationTest
+             verifies consumers' pacts against this daemon's provider side, on the version every
+             provider and consumer on the estate uses, so a pact is read the same way everywhere.
+             This daemon calls no REST provider of its own (qits-876 retired the commissioned-pair
+             mint against qits-idp), so there is no consumer half here any more. -->
         <pact.version>4.7.5</pact.version>
-
-        <!-- The consumer half of the contracts (ticket qits-1149): the shared golden-master reader,
-             and the provider recordings the daemon's pact rows are written against. Exact
-             versions: a new recording is a contract change, adopted on purpose. -->
-        <qits-pact-consumer.version>2026.1019.82625</qits-pact-consumer.version>
-        <qits-idp-golden-masters.version>2026.1022.183304</qits-idp-golden-masters.version>
 
         <!-- THE CONSUMER PACTS ConsumerPactVerificationTest verifies (ticket qits-1149): one jar per
              consumer that commits `pacts/<consumer>_qits-projects-daemon.json`, test scope. Exact

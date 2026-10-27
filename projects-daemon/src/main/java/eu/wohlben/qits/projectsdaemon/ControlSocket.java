@@ -46,13 +46,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.io.File;
 import java.net.URI;
-import java.net.URLEncoder;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import java.time.Duration;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -110,35 +104,15 @@ public class ControlSocket {
   @ConfigProperty(name = "qits.projects-daemon.url")
   Optional<String> url;
 
-  /** The per-container IdP client commissioned by qits-projects. */
-  @ConfigProperty(name = "qits.commissioned-client-id")
-  Optional<String> commissionedClientId;
-
-  /** Its one-time secret, paired with {@link #commissionedClientId}. */
-  @ConfigProperty(name = "qits.commissioned-client-secret")
-  Optional<String> commissionedClientSecret;
-
-  /** Where that client exchanges its pair for the control socket's bearer token. */
-  @ConfigProperty(name = "qits.projects-daemon.auth-token-url")
-  Optional<String> authTokenUrl;
-
-  /** The qits-projects audience required by the protected control socket. */
-  @ConfigProperty(name = "qits.projects-daemon.auth-audience")
-  Optional<String> authAudience;
-
-  /** The qits-githost audience used only while self-cloning the project checkout. */
-  @ConfigProperty(name = "qits.projects-daemon.git-auth-audience")
-  Optional<String> gitAuthAudience;
-
   /**
    * The project token ({@code QITS_TOKEN}), set only on a runner-placed project container — a front
    * desk on somebody's own machine, which reaches qits only through the public edge, and the edge
    * admits a bearer and nothing else. Where it is set it is the whole credential: the control
    * socket, every tunnel dial-back, the boot clone's git header and the platform MCP servers all
-   * present it as is, and nothing is minted ({@link #authorization()}) — not even when a
-   * commissioned pair happens to be present too. Read here and nowhere else; everything else is
-   * handed it. The same shape as qits-workspace-daemon's {@code qits.workspace-daemon.token}
-   * (qits-625).
+   * present it as is, and nothing is minted ({@link #bearer()}). It is this daemon's only dial-home
+   * credential; absent, the daemon dials anonymously, as the clone-alone/developer topology does.
+   * Read here and nowhere else; everything else is handed it. The same shape as
+   * qits-workspace-daemon's {@code qits.workspace-daemon.token} (qits-625).
    */
   @ConfigProperty(name = "qits.projects-daemon.token")
   Optional<String> token;
@@ -323,8 +297,6 @@ public class ControlSocket {
           });
 
   private volatile WebSocketClient client;
-  private final HttpClient tokenClient =
-      HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
   private volatile WebSocket socket;
   private volatile Context socketContext;
 
@@ -529,18 +501,9 @@ public class ControlSocket {
     }
     workers.execute(
         () -> {
-          String gitAuthorization = "";
-          try {
-            // The project token, when set, is the git header as is and nothing is minted;
-            // otherwise a bearer for qits-githost's audience.
-            gitAuthorization = authorization(gitAuthAudience).join().orElse("");
-          } catch (RuntimeException e) {
-            send(
-                new ProvisionFailed(
-                    projectId, "could not mint git authorization: " + rootMessage(e)));
-            wireCapabilities();
-            return;
-          }
+          // The project token, when set, is the git header as is; nothing is minted, and absent, the
+          // boot clone is anonymous too — the same credential every other dial-home presents.
+          String gitAuthorization = bearer().orElse("");
           Provisioner.Env env =
               new Provisioner.Env(
                   projectId, repoName, gitBaseConfig.orElse(""), gitAuthorization);
@@ -895,20 +858,7 @@ public class ControlSocket {
       LOG.errorf(e, "Malformed qits.projects-daemon.url '%s' — projects-daemon idle.", url.get());
       return; // an unparseable URL will not become parseable on retry; stay alive, stay idle
     }
-    authorization()
-        .whenComplete(
-            (authorization, failure) ->
-                vertx.runOnContext(
-                    ignored -> {
-                      if (failure != null) {
-                        LOG.debugf(
-                            "projects-daemon could not mint its dial-home token (attempt %d): %s",
-                            attempt, failure.getMessage());
-                        reconnect(attempt);
-                        return;
-                      }
-                      connect(uri, attempt, authorization);
-                    }));
+    connect(uri, attempt, bearer());
   }
 
   private void connect(URI uri, int attempt, Optional<String> authorization) {
@@ -950,108 +900,14 @@ public class ControlSocket {
   }
 
   /**
-   * The {@code Authorization} the control socket last dialled with — the project token, or the
-   * bearer minted for qits-projects' audience. Empty until the first mint, and on the anonymous
-   * developer topology.
-   */
-  private volatile Optional<String> controlAuthorization = Optional.empty();
-
-  /**
-   * What every tunnel dial-back carries: the project token when there is one, otherwise the same
-   * minted bearer the control socket dialled with, so an internal dial-back is never anonymous
-   * either. Never mints by itself — the dial-back follows an {@code OpenStream} that arrived over a
-   * socket that already presented this bearer.
+   * What every tunnel dial-back carries: the same {@link #bearer()} the control socket dials home
+   * with, so an internal dial-back presents exactly what the socket it followed from presented —
+   * the project token, or nothing on the anonymous clone-alone/developer topology. Nothing is
+   * minted, by this method or by {@link #bearer()}: the dial-back follows an {@code OpenStream}
+   * that arrived over a socket already dialled with this same credential.
    */
   Optional<String> dialBackAuthorization() {
-    Optional<String> bearer = bearer();
-    return bearer.isPresent() ? bearer : controlAuthorization;
-  }
-
-  /**
-   * The control socket's {@code Authorization}, without blocking the Vert.x event loop, remembered
-   * for {@link #dialBackAuthorization()}.
-   *
-   * <p>The project token wins outright: present, it is the header and nothing is minted. Absent,
-   * the commissioned pair is exchanged for a machine token by {@code client_secret_post} — the
-   * client id and secret in the form body, no {@code Basic} header, because the edge eats a {@code
-   * Basic} header rather than forwarding it (qits-625 made the same switch). Absent configuration
-   * keeps the clone-alone/developer topology anonymous; a partial configuration fails closed and is
-   * retried with the socket.
-   */
-  java.util.concurrent.CompletableFuture<Optional<String>> authorization() {
-    return authorization(authAudience)
-        .thenApply(
-            authorization -> {
-              controlAuthorization = authorization;
-              return authorization;
-            });
-  }
-
-  /**
-   * The {@code Authorization} for {@code audience} — the control socket's, or the boot clone's
-   * against qits-githost. The project token, when set, answers for every audience: it is one
-   * credential the edge accepts for every platform host.
-   */
-  java.util.concurrent.CompletableFuture<Optional<String>> authorization(
-      Optional<String> audience) {
-    Optional<String> bearer = bearer();
-    if (bearer.isPresent()) {
-      return java.util.concurrent.CompletableFuture.completedFuture(bearer);
-    }
-    boolean any =
-        commissionedClientId.isPresent()
-            || commissionedClientSecret.isPresent()
-            || authTokenUrl.isPresent()
-            || audience.isPresent();
-    if (!any) {
-      return java.util.concurrent.CompletableFuture.completedFuture(Optional.empty());
-    }
-    if (commissionedClientId.isEmpty()
-        || commissionedClientSecret.isEmpty()
-        || authTokenUrl.isEmpty()
-        || audience.isEmpty()) {
-      return java.util.concurrent.CompletableFuture.failedFuture(
-          new IllegalStateException("commissioned dial-home authentication is incomplete"));
-    }
-    HttpRequest request;
-    try {
-      String form =
-          "grant_type=client_credentials&client_id="
-              + URLEncoder.encode(commissionedClientId.get(), StandardCharsets.UTF_8)
-              + "&client_secret="
-              + URLEncoder.encode(commissionedClientSecret.get(), StandardCharsets.UTF_8)
-              + "&audience="
-              + URLEncoder.encode(audience.get(), StandardCharsets.UTF_8);
-      request =
-          HttpRequest.newBuilder(URI.create(authTokenUrl.get()))
-              .timeout(Duration.ofSeconds(5))
-              .header("Content-Type", "application/x-www-form-urlencoded")
-              .POST(HttpRequest.BodyPublishers.ofString(form))
-              .build();
-    } catch (RuntimeException e) {
-      return java.util.concurrent.CompletableFuture.failedFuture(e);
-    }
-    return tokenClient
-        .sendAsync(request, HttpResponse.BodyHandlers.ofString())
-        .thenApply(
-            response -> {
-              if (response.statusCode() / 100 != 2) {
-                throw new IllegalStateException("idp answered " + response.statusCode());
-              }
-              String token = new JsonObject(response.body()).getString("access_token");
-              if (token == null || token.isBlank()) {
-                throw new IllegalStateException("idp answered without an access token");
-              }
-              return Optional.of("Bearer " + token);
-            });
-  }
-
-  private static String rootMessage(Throwable failure) {
-    Throwable current = failure;
-    while (current.getCause() != null) {
-      current = current.getCause();
-    }
-    return current.getMessage() == null ? current.getClass().getSimpleName() : current.getMessage();
+    return bearer();
   }
 
   private void onConnected(WebSocket ws) {

@@ -37,8 +37,6 @@ import org.junit.jupiter.api.io.TempDir;
 class CheckoutFollowerTest {
 
   private static final String GIT_BASE = "http://dev-qits-githost:8080/git";
-  private static final String TOKEN_URL = "http://qits-idp:8080/realms/qits/token";
-  private static final String GIT_AUDIENCE = "qits-githost-env";
 
   @TempDir Path tempDir;
 
@@ -355,8 +353,6 @@ class CheckoutFollowerTest {
     ControlSocket daemon = new ControlSocket();
     daemon.checkoutFollow = false;
     daemon.gitBaseConfig = Optional.of(GIT_BASE);
-    daemon.authTokenUrl = Optional.of(TOKEN_URL);
-    daemon.gitAuthAudience = Optional.of(GIT_AUDIENCE);
     daemon.termGraceMs = 1_000;
     return daemon;
   }

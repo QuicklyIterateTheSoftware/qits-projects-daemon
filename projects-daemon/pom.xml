@@ -91,27 +91,6 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <!-- consumer/: this daemon's own consumer pacts (ticket qits-1149). -->
-            <groupId>au.com.dius.pact.consumer</groupId>
-            <artifactId>junit5</artifactId>
-            <version>${pact.version}</version>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <!-- consumer/: reads qits-idp's golden masters and turns them into pact rows. -->
-            <groupId>eu.wohlben.qits</groupId>
-            <artifactId>qits-pact-consumer</artifactId>
-            <version>${qits-pact-consumer.version}</version>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <!-- consumer/: what qits-idp answers, per provider state. -->
-            <groupId>eu.wohlben.qits</groupId>
-            <artifactId>qits-idp-golden-masters</artifactId>
-            <version>${qits-idp-golden-masters.version}</version>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
             <!-- The consumer pacts ConsumerPactVerificationTest verifies: each jar carries one
                  `pacts/<consumer>_qits-projects-daemon.json`, read off the classpath. The pinned jar
                  IS the source of the pact; nothing is copied into this tree. -->
