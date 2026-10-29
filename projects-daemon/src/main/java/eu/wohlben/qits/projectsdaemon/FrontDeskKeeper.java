@@ -14,6 +14,7 @@ import eu.wohlben.qits.projectsdaemon.SessionKeeper.Scheduler;
 import eu.wohlben.qits.projectsdaemon.SessionKeeper.Timing;
 import eu.wohlben.qits.projectsdaemon.protocol.DaemonLog;
 import eu.wohlben.qits.projectsdaemon.protocol.DaemonMessage;
+import eu.wohlben.qits.projectsdaemon.protocol.DeskBrief;
 import eu.wohlben.qits.projectsdaemon.protocol.SessionCredentials;
 import eu.wohlben.qits.projectsdaemon.protocol.SessionReport;
 import eu.wohlben.qits.projectsdaemon.protocol.Sessions;
@@ -329,9 +330,9 @@ final class FrontDeskKeeper {
   static String interruptedPrompt(SessionLadder.Reason reason) {
     return "You were interrupted (reason: "
         + reason.text()
-        + "). Re-read "
-        + DeliveryKeeper.BRIEF_PATH
-        + ", it may have changed, then carry on where you stopped.";
+        + "). "
+        + DeskBrief.pointer(null)
+        + " Then carry on where you stopped.";
   }
 
   /**

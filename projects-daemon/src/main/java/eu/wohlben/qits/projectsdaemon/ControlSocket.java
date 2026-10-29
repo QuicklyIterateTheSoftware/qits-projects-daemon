@@ -450,9 +450,6 @@ public class ControlSocket {
     // which is what "fails visibly rather than idling while looking healthy" means for this image.
     surfaceConfigurations =
         AgentConfigurationBoot.materialize(agentConfiguration, agentConfigurationPath);
-    // The delivery loop's brief is the project.delivery surface's prompt in that document, and the
-    // document is read only here, so this is where the brief is (re)written. Never throws.
-    DeliveryKeeper.writeBrief(DeliveryKeeper.BRIEF_PATH, surfaceConfigurations, projectId);
     if (url.isEmpty() || url.get().isBlank()) {
       LOG.warn(
           "No qits.projects-daemon.url configured — projects-daemon is idle (the container stays"

@@ -56,8 +56,8 @@ library declares:
     FrontDeskCredential     the one seam deciding the front desk launch's credential: the `front-desk` session
                             credential once qits sent any; before that (legacy) the delivery token as
                             QITS_TOKEN while delivering, the container's own token otherwise
-    DeliveryKeeper          the delivery settings, the loop's brief (written at boot) and the front desk
-                            session seam; it types nothing — no turn reaches the desk on a schedule (qits-1597)
+    DeliveryKeeper          the delivery settings and the front desk session seam; it types nothing — no
+                            turn reaches the desk on a schedule (qits-1597)
     FrontDeskInbox          turns qits types into the keeper's own front desk (POST /front-desk/prompt),
                             queued while it is busy, and its last answer (GET /front-desk/last-answer)
     DaemonSecrets           keeping the daemon's secrets — QITS_DELIVERY_TOKEN(_SUBJECT), the API token,
@@ -448,12 +448,14 @@ derive fails at the boundary instead of far from it.
                                          checkout follower, the git reads, the probes, the sign-in terminal —
                                          strip or blank them
 
-**The delivery loop's brief is a file** (`/tmp/qits-delivery-brief.md`, 0644), written at boot right after
-the agent configuration document is materialized — the only time that document is read. Its text is the
-`project.delivery` surface's `systemPrompt` from that document; absent or blank ⇒ a short fallback telling
-the session to read its rules with `qits projects delivery --project <projectId>` and do one pass. A
-prompted pass reads it; nothing points the desk at it on its own. The `project.delivery` surface is only
-the brief's store: nothing launches it.
+**The desk's brief is the platform-served guide, not a file** (qits-1734). The desk reads its brief with
+`qits help guide` (the delivery desk variant of the guide the platform serves for wherever it is run);
+the daemon writes no brief file any more. Every prompt that points the desk at it — qits-projects-service's
+and this daemon's alike — composes `DeskBrief` from projects-daemon-protocol (`DeskBrief.INSTRUCTION`,
+`DeskBrief.pointer(hash)`) rather than spelling the sentence out itself, so find-usages on those constants
+lists every prompt that relies on the brief. The restart notice (`FrontDeskKeeper.interruptedPrompt`) states
+no hash, because the daemon never fetches the guide itself — it composes `DeskBrief.pointer(null)`, which
+falls back to `DeskBrief.HASH_CHECK`.
 
 ## No child holds the daemon's secrets, and each session runs on its own token (qits-1482)
 

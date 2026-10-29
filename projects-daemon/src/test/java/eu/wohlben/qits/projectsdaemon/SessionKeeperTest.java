@@ -17,6 +17,7 @@ import eu.wohlben.qits.commands.CommandStatus;
 import eu.wohlben.qits.projectsdaemon.FrontDeskKeeper.Lifecycle;
 import eu.wohlben.qits.projectsdaemon.protocol.DaemonLog;
 import eu.wohlben.qits.projectsdaemon.protocol.DaemonMessage;
+import eu.wohlben.qits.projectsdaemon.protocol.DeskBrief;
 import eu.wohlben.qits.projectsdaemon.protocol.SessionCredentials;
 import eu.wohlben.qits.projectsdaemon.protocol.SessionReport;
 import eu.wohlben.qits.projectsdaemon.protocol.Sessions;
@@ -570,8 +571,9 @@ class SessionKeeperTest {
   private static String interrupted(String reason) {
     return "You were interrupted (reason: "
         + reason
-        + "). Re-read /tmp/qits-delivery-brief.md, it may have changed, then carry on where you"
-        + " stopped.";
+        + "). "
+        + DeskBrief.pointer(null)
+        + " Then carry on where you stopped.";
   }
 
   /**
