@@ -99,6 +99,12 @@
             <version>${qits-projects-service-pacts-qits-projects-daemon.version}</version>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <!-- ProviderStateCoverageTest (qits-1754): the platform's shared rules. -->
+            <groupId>eu.wohlben.qits</groupId>
+            <artifactId>qits-arch-rules</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

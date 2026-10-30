@@ -64,6 +64,10 @@
         <!-- Where the platform publishes it. Overridden by CI (-Dqits.maven.repository.url), derived
              from QITS_DOMAIN; the default below is the public host. -->
         <qits.maven.repository.url>https://registry.qits.wohlben.eu/artifacts/maven/maven</qits.maven.repository.url>
+        <!-- The platform's shared rules, test scope only (qits-1754). ProviderStateCoverageTest is
+             what this repo takes it for. Published by qits-integrations-quarkus into the same
+             platform Maven repository as the coordinates above. -->
+        <qits.arch-rules.version>2026.1030.30851</qits.arch-rules.version>
     </properties>
 
     <dependencyManagement>
@@ -104,6 +108,13 @@
                 <groupId>eu.wohlben.qits</groupId>
                 <artifactId>qits-coding-agents</artifactId>
                 <version>${qits-coding-agents.version}</version>
+            </dependency>
+            <dependency>
+                <!-- The platform's shared rules, test scope. ProviderStateCoverageTest is what
+                     this repo takes it for. -->
+                <groupId>eu.wohlben.qits</groupId>
+                <artifactId>qits-arch-rules</artifactId>
+                <version>${qits.arch-rules.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
