@@ -1,9 +1,19 @@
 package eu.wohlben.qits.projectsdaemon.contracts;
 
+import eu.wohlben.qits.agents.AgentSessionStore;
 import eu.wohlben.qits.agents.AgentType;
 import eu.wohlben.qits.agents.HarnessCapabilities;
+import eu.wohlben.qits.commands.ActionResolver;
+import eu.wohlben.qits.commands.AgentSessionRef;
+import eu.wohlben.qits.commands.AgentSessionSource;
+import eu.wohlben.qits.commands.Command;
+import eu.wohlben.qits.commands.CommandKind;
+import eu.wohlben.qits.commands.CommandLogLine;
+import eu.wohlben.qits.commands.CommandStatus;
+import eu.wohlben.qits.commands.LogChannel;
 import eu.wohlben.qits.projectsdaemon.ContractSeams;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -24,7 +34,9 @@ import java.util.function.Function;
  * API on an ephemeral loopback port, mounted at {@code /projects/container/<projectId>} as
  * qits-projects mounts it, and the caller closes it.
  *
- * <p><b>Every value is fixed</b>, so a recording holds nothing to freeze. The API demands {@code
+ * <p><b>Every value is fixed</b>, so a recording holds nothing to freeze — with one exception: {@code
+ * POST /commands} really launches, and the command it answers has the id and instant that launch
+ * generated, which {@link GoldenMasterRecordingTest} freezes ({@link Freezer}). The API demands {@code
  * Authorization: Bearer <apiToken>}; the token is a state param, so a consumer's pact names it.
  */
 public final class ProviderStates {
@@ -48,6 +60,42 @@ public final class ProviderStates {
    */
   public static final String A_DAEMON_WHOSE_FRONT_DESK_IS_RUNNING =
       "a daemon whose front desk is running";
+
+  /**
+   * The daemon ran one declared action to completion (qits-1938): its store holds that finished
+   * command — EXITED 0, no registry process behind it — with three captured output lines, and the
+   * container declares that one action, so {@code POST /commands} of it launches. The command's id
+   * is the {@code commandId} param.
+   */
+  public static final String A_DAEMON_THAT_RAN_ONE_COMMAND = "a daemon that ran one command";
+
+  /**
+   * The daemon drove one coding-agent session (qits-1938): its store holds the finished agent
+   * command that pinned the session, and the session sweep counted its messages, so {@code GET
+   * /agent-sessions} answers a one-node tree.
+   */
+  public static final String A_DAEMON_THAT_DROVE_ONE_AGENT_SESSION =
+      "a daemon that drove one agent session";
+
+  /**
+   * The daemon is inside its grace window for qits' session credentials (qits-1482): a person's
+   * {@code POST /agents} is "not yet", 503 with a {@code Retry-After}, and launches nothing.
+   */
+  public static final String A_DAEMON_WAITING_FOR_SESSION_CREDENTIALS =
+      "a daemon waiting for session credentials";
+
+  /** The command the one-command state ran. */
+  static final String RAN_COMMAND_ID = "00000000-0000-4000-8000-00000000c001";
+
+  /** The one action that state declares: a script that does nothing and exits 0. */
+  static final ActionResolver.ResolvedAction DECLARED_ACTION =
+      new ActionResolver.ResolvedAction("check", "Check", "true", false, Map.of());
+
+  /** The agent command the agent-session state drove. */
+  static final String AGENT_COMMAND_ID = "00000000-0000-4000-8000-00000000a001";
+
+  /** The Claude session that agent command pinned. */
+  static final String AGENT_SESSION_ID = "00000000-0000-4000-8000-00000000a002";
 
   /** The front desk's kept command. */
   static final String FRONT_DESK_COMMAND_ID = "00000000-0000-4000-8000-00000000fd01";
@@ -91,6 +139,10 @@ public final class ProviderStates {
     states.put(A_DAEMON_WHOSE_HARNESSES_WERE_PROBED, this::aDaemonWhoseHarnessesWereProbed);
     states.put(A_DAEMON_WHOSE_AGENTS_ARE_NOT_WIRED_YET, this::aDaemonWhoseAgentsAreNotWiredYet);
     states.put(A_DAEMON_WHOSE_FRONT_DESK_IS_RUNNING, this::aDaemonWhoseFrontDeskIsRunning);
+    states.put(A_DAEMON_THAT_RAN_ONE_COMMAND, this::aDaemonThatRanOneCommand);
+    states.put(A_DAEMON_THAT_DROVE_ONE_AGENT_SESSION, this::aDaemonThatDroveOneAgentSession);
+    states.put(
+        A_DAEMON_WAITING_FOR_SESSION_CREDENTIALS, this::aDaemonWaitingForSessionCredentials);
   }
 
   /** Every state name this provider answers for. */
@@ -134,6 +186,91 @@ public final class ProviderStates {
             FRONT_DESK_TRANSCRIPT));
   }
 
+  private Setup aDaemonThatRanOneCommand(Path root) {
+    Instant launchedAt = Instant.parse("2026-10-01T12:00:00Z");
+    Command ran =
+        Command.running(
+                RAN_COMMAND_ID,
+                CommandKind.TERMINAL,
+                "main",
+                "0123456",
+                DECLARED_ACTION.id(),
+                DECLARED_ACTION.name(),
+                DECLARED_ACTION.executeScript(),
+                false,
+                null,
+                launchedAt)
+            .finished(CommandStatus.EXITED, 0, Instant.parse("2026-10-01T12:00:03Z"));
+    List<CommandLogLine> log =
+        List.of(
+            new CommandLogLine(
+                1, LogChannel.OUTPUT, "Checking qits-qits", null, launchedAt.plusSeconds(1)),
+            new CommandLogLine(
+                2, LogChannel.OUTPUT, "All checks passed", null, launchedAt.plusSeconds(2)),
+            new CommandLogLine(3, LogChannel.OUTPUT, "Done", null, launchedAt.plusSeconds(3)));
+    Map<String, String> params = new TreeMap<>(params());
+    params.put("commandId", RAN_COMMAND_ID);
+    return new Setup(
+        Collections.unmodifiableMap(params),
+        ContractSeams.startApiWithCommands(
+            root,
+            PROJECT_ID,
+            API_TOKEN,
+            IMAGE_VERSION,
+            reportedBy(),
+            probedHarnesses(),
+            List.of(ran),
+            Map.of(RAN_COMMAND_ID, log),
+            List.of(DECLARED_ACTION)));
+  }
+
+  private Setup aDaemonThatDroveOneAgentSession(Path root) {
+    Instant launchedAt = Instant.parse("2026-10-01T12:00:00Z");
+    Command agent =
+        Command.running(
+                AGENT_COMMAND_ID,
+                CommandKind.TERMINAL,
+                "main",
+                "0123456",
+                null,
+                "Claude",
+                "claude",
+                true,
+                AgentType.CLAUDE.name(),
+                "project.work",
+                launchedAt)
+            .withSession(
+                new AgentSessionRef(
+                    AGENT_SESSION_ID,
+                    AgentSessionSource.PINNED,
+                    null,
+                    null,
+                    launchedAt.plusSeconds(1)))
+            .finished(CommandStatus.EXITED, 0, Instant.parse("2026-10-01T12:30:00Z"));
+    List<AgentSessionStore.Stat> stats =
+        List.of(
+            new AgentSessionStore.Stat(
+                AGENT_COMMAND_ID, AGENT_SESSION_ID, null, null, null, 12, launchedAt));
+    return new Setup(
+        params(),
+        ContractSeams.startApiWithAgentSessions(
+            root,
+            PROJECT_ID,
+            API_TOKEN,
+            IMAGE_VERSION,
+            reportedBy(),
+            probedHarnesses(),
+            List.of(agent),
+            stats));
+  }
+
+  private Setup aDaemonWaitingForSessionCredentials(Path root) {
+    return new Setup(
+        params(),
+        ContractSeams.startApiAwaitingSessionCredentials(
+            root, PROJECT_ID, API_TOKEN, IMAGE_VERSION, reportedBy(), probedHarnesses()));
+  }
+
   private static String reportedBy() {
     return "project-agent/" + PROJECT_ID;
   }
@@ -160,7 +297,7 @@ public final class ProviderStates {
     return new Setup(params(), ContractSeams.startApiBeforeAgents(root, PROJECT_ID, API_TOKEN));
   }
 
-  /** Every state's params: the one project and the bearer its API demands. */
+  /** Every state's params: the one project and the bearer its API demands (and a state's own). */
   private static Map<String, String> params() {
     Map<String, String> params = new TreeMap<>();
     params.put("projectId", PROJECT_ID);

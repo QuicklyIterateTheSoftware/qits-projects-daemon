@@ -1,0 +1,12 @@
+{
+  "sessions": [
+    {
+      "sessionId": "00000000-0000-4000-8000-00000000a002",
+      "firstRecordedAt": "2026-10-01T12:00:01Z",
+      "messageCount": 12,
+      "newestCommandId": "00000000-0000-4000-8000-00000000a001",
+      "subagents": [],
+      "children": []
+    }
+  ]
+}

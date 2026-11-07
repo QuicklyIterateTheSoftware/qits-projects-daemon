@@ -35,8 +35,12 @@ import org.junit.jupiter.api.io.TempDir;
  * the route template, a query would be recorded apart as {@code query}, a request body is recorded
  * as {@code body}, and an operation that takes no body records none.
  *
- * <p><b>Nothing is frozen.</b> The state fixes every value, so the body is recorded as it is and the
- * index's {@code frozen} lists are empty.
+ * <p><b>Almost nothing is frozen.</b> The state fixes every value, so a body is recorded as it is and
+ * the index's {@code frozen} lists are empty — except for an interaction marked {@link
+ * Interaction#frozen()}, whose answer carries what the daemon generated while answering (the id
+ * and instant of a command {@code POST /commands} really launched). That one answer goes through
+ * {@link Freezer}, seeded with the state's params — already fixed, frozen-shaped ids, so each keeps
+ * its own number — and the paths it froze are the operation's {@code frozen} lists.
  *
  * <p>It <b>compares by default</b> and fails with a unified diff per differing file — including a
  * committed {@code .json} no interaction produces any more. {@code -Dgolden.update=true} (or {@code
@@ -55,10 +59,26 @@ class GoldenMasterRecordingTest {
    * the state. {@code body} is the JSON request body, null for an operation that takes none.
    */
   record Interaction(
-      String state, String operationId, String method, String path, String body, int status) {
+      String state,
+      String operationId,
+      String method,
+      String path,
+      String body,
+      int status,
+      boolean freeze) {
+
+    Interaction(
+        String state, String operationId, String method, String path, String body, int status) {
+      this(state, operationId, method, path, body, status, false);
+    }
 
     Interaction(String state, String operationId, String method, String path, int status) {
       this(state, operationId, method, path, null, status);
+    }
+
+    /** This interaction with its answer frozen ({@link Freezer}). */
+    Interaction frozen() {
+      return new Interaction(state, operationId, method, path, body, status, true);
     }
   }
 
@@ -92,7 +112,72 @@ class GoldenMasterRecordingTest {
               "getFrontDeskLastAnswer",
               "GET",
               "/projects/container/{projectId}/front-desk/last-answer",
-              200));
+              200),
+          new Interaction(
+              ProviderStates.A_DAEMON_THAT_RAN_ONE_COMMAND,
+              "listCommands",
+              "GET",
+              "/projects/container/{projectId}/commands",
+              200),
+          new Interaction(
+              ProviderStates.A_DAEMON_THAT_RAN_ONE_COMMAND,
+              "listCommandActions",
+              "GET",
+              "/projects/container/{projectId}/commands/actions",
+              200),
+          new Interaction(
+              ProviderStates.A_DAEMON_THAT_RAN_ONE_COMMAND,
+              "getCommand",
+              "GET",
+              "/projects/container/{projectId}/commands/{commandId}",
+              200),
+          new Interaction(
+              ProviderStates.A_DAEMON_THAT_RAN_ONE_COMMAND,
+              "getCommandLog",
+              "GET",
+              "/projects/container/{projectId}/commands/{commandId}/log",
+              200),
+          new Interaction(
+              ProviderStates.A_DAEMON_THAT_RAN_ONE_COMMAND,
+              "terminateCommand",
+              "POST",
+              "/projects/container/{projectId}/commands/{commandId}/terminate",
+              200),
+          new Interaction(
+                  ProviderStates.A_DAEMON_THAT_RAN_ONE_COMMAND,
+                  "launchCommand",
+                  "POST",
+                  "/projects/container/{projectId}/commands",
+                  "{\"actionId\":\"check\"}",
+                  200)
+              .frozen(),
+          new Interaction(
+              ProviderStates.A_DAEMON_THAT_DROVE_ONE_AGENT_SESSION,
+              "listAgentSessions",
+              "GET",
+              "/projects/container/{projectId}/agent-sessions",
+              200),
+          new Interaction(
+              ProviderStates.A_DAEMON_WHOSE_AGENTS_ARE_NOT_WIRED_YET,
+              "launchAgent",
+              "POST",
+              "/projects/container/{projectId}/agents",
+              "{\"scope\":\"REPOSITORY\",\"surface\":\"project.work\"}",
+              503),
+          new Interaction(
+              ProviderStates.A_DAEMON_WHOSE_AGENTS_ARE_NOT_WIRED_YET,
+              "openAgentSignIn",
+              "POST",
+              "/projects/container/{projectId}/agents/sign-in",
+              "{\"agentType\":\"CLAUDE\"}",
+              503),
+          new Interaction(
+              ProviderStates.A_DAEMON_WAITING_FOR_SESSION_CREDENTIALS,
+              "launchAgent",
+              "POST",
+              "/projects/container/{projectId}/agents",
+              "{\"scope\":\"REPOSITORY\",\"surface\":\"project.work\"}",
+              503));
 
   private static final ObjectMapper JSON = new ObjectMapper();
 
@@ -119,8 +204,16 @@ class GoldenMasterRecordingTest {
       String slug = ProviderStates.slug(interaction.state());
       String file = slug + "/" + interaction.operationId() + ".json";
 
+      // The params are fixed and already frozen-shaped, so seeding them as their own committed form
+      // pins each to its own number and the answer's generated ids number above them.
+      Freezer freezer = interaction.freeze() ? new Freezer().seed(params, params) : null;
+      if (freezer != null) {
+        body = freezer.freeze(body);
+      }
       ObjectNode frozenParams = JsonNodeFactory.instance.objectNode();
-      params.forEach(frozenParams::put);
+      params.forEach(
+          (key, value) ->
+              frozenParams.put(key, freezer == null ? value : freezer.freezeParam(value)));
       ObjectNode state = indexStates.get(slug);
       if (state == null) {
         state = JsonNodeFactory.instance.objectNode();
@@ -143,9 +236,14 @@ class GoldenMasterRecordingTest {
       operation.put("status", interaction.status());
       operation.put("file", file);
       ObjectNode frozen = operation.putObject("frozen");
-      frozen.putArray("ids");
-      frozen.putArray("instants");
-      frozen.putArray("strings");
+      ArrayNode ids = frozen.putArray("ids");
+      ArrayNode instants = frozen.putArray("instants");
+      ArrayNode strings = frozen.putArray("strings");
+      if (freezer != null) {
+        freezer.idPaths().forEach(ids::add);
+        freezer.instantPaths().forEach(instants::add);
+        freezer.stringPaths().forEach(strings::add);
+      }
       frozen.putNull("listFilteredTo");
       if (indexOperations
               .computeIfAbsent(slug, k -> new TreeMap<>())

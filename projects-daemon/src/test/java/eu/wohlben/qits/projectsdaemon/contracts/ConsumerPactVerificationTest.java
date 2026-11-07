@@ -128,4 +128,19 @@ class ConsumerPactVerificationTest {
   Map<String, String> aDaemonWhoseFrontDeskIsRunning() {
     return running == null ? Map.of() : running.params();
   }
+
+  @State(ProviderStates.A_DAEMON_THAT_RAN_ONE_COMMAND)
+  Map<String, String> aDaemonThatRanOneCommand() {
+    return running == null ? Map.of() : running.params();
+  }
+
+  @State(ProviderStates.A_DAEMON_THAT_DROVE_ONE_AGENT_SESSION)
+  Map<String, String> aDaemonThatDroveOneAgentSession() {
+    return running == null ? Map.of() : running.params();
+  }
+
+  @State(ProviderStates.A_DAEMON_WAITING_FOR_SESSION_CREDENTIALS)
+  Map<String, String> aDaemonWaitingForSessionCredentials() {
+    return running == null ? Map.of() : running.params();
+  }
 }

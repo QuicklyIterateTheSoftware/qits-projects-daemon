@@ -1,0 +1,17 @@
+{
+  "command": {
+    "id": "00000000-0000-4000-8000-00000000c002",
+    "projectId": "00000000-0000-4000-8000-000000000001",
+    "repoName": "qits-qits",
+    "branch": "main",
+    "actionName": "Check",
+    "status": "RUNNING",
+    "interactive": false,
+    "kind": "TERMINAL",
+    "launchedAt": "2026-01-01T00:00:00Z",
+    "agentSessions": [],
+    "commitHash": "0123456",
+    "shortCommitHash": "0123456",
+    "actionId": "check"
+  }
+}

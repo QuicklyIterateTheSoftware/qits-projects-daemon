@@ -1,7 +1,12 @@
 package eu.wohlben.qits.projectsdaemon;
 
+import eu.wohlben.qits.agents.AgentSessionQueryService;
+import eu.wohlben.qits.agents.AgentSessionStore;
 import eu.wohlben.qits.agents.HarnessCapabilities;
+import eu.wohlben.qits.commands.ActionResolver;
+import eu.wohlben.qits.commands.Command;
 import eu.wohlben.qits.commands.CommandLifecycleService;
+import eu.wohlben.qits.commands.CommandLogLine;
 import eu.wohlben.qits.commands.CommandLogService;
 import eu.wohlben.qits.commands.CommandRegistry;
 import eu.wohlben.qits.commands.CommandService;
@@ -9,7 +14,9 @@ import eu.wohlben.qits.commands.CommandStore;
 import eu.wohlben.qits.commands.GuardedInput;
 import io.vertx.core.Vertx;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
@@ -28,10 +35,12 @@ public final class ContractSeams {
 
     private final Vertx vertx;
     private final ProjectsApi api;
+    private final CommandRegistry registry;
 
-    private RunningApi(Vertx vertx, ProjectsApi api) {
+    private RunningApi(Vertx vertx, ProjectsApi api, CommandRegistry registry) {
       this.vertx = vertx;
       this.api = api;
+      this.registry = registry;
     }
 
     public int port() {
@@ -40,6 +49,8 @@ public final class ContractSeams {
 
     @Override
     public void close() {
+      // A state that launches a command leaves its process in the registry; end it with the state.
+      registry.terminateAll();
       api.close();
       vertx.close();
     }
@@ -58,7 +69,8 @@ public final class ContractSeams {
       String imageVersion,
       String reportedBy,
       List<HarnessCapabilities> capabilities) {
-    return start(root, projectId, apiToken, imageVersion, reportedBy, capabilities, true);
+    return start(
+        root, projectId, apiToken, imageVersion, reportedBy, capabilities, true, new Wiring());
   }
 
   /**
@@ -67,7 +79,7 @@ public final class ContractSeams {
    * answers 503.
    */
   public static RunningApi startApiBeforeAgents(Path root, String projectId, String apiToken) {
-    return start(root, projectId, apiToken, null, null, List.of(), false);
+    return start(root, projectId, apiToken, null, null, List.of(), false, new Wiring());
   }
 
   /**
@@ -86,7 +98,8 @@ public final class ContractSeams {
       String keptCommandId,
       List<String> transcript) {
     RunningApi running =
-        start(root, projectId, apiToken, imageVersion, reportedBy, capabilities, true);
+        start(
+            root, projectId, apiToken, imageVersion, reportedBy, capabilities, true, new Wiring());
     DeliveryKeeper.Session session =
         new DeliveryKeeper.Session() {
           @Override
@@ -124,6 +137,100 @@ public final class ContractSeams {
     return running;
   }
 
+  /**
+   * The API with its agent surface wired (as {@link #startApi}) over a command store holding {@code
+   * commands} — finished ones, which no registry process backs — whose log buffers hold {@code
+   * logs}, and with {@code actions} declared, so {@code POST /commands} of one of them really
+   * spawns its script in {@code root}.
+   */
+  public static RunningApi startApiWithCommands(
+      Path root,
+      String projectId,
+      String apiToken,
+      String imageVersion,
+      String reportedBy,
+      List<HarnessCapabilities> capabilities,
+      List<Command> commands,
+      Map<String, List<CommandLogLine>> logs,
+      List<ActionResolver.ResolvedAction> actions) {
+    Wiring wiring = new Wiring();
+    seed(wiring.store, commands, logs);
+    wiring.actions = new DeclaredActions(actions);
+    return start(root, projectId, apiToken, imageVersion, reportedBy, capabilities, true, wiring);
+  }
+
+  /**
+   * The API with its agent surface wired (as {@link #startApi}) and a real {@link
+   * AgentSessionQueryService} over a command store holding {@code commands}, whose sweep stats are
+   * {@code stats} — so {@code GET /agent-sessions} answers the tree those commands drove.
+   */
+  public static RunningApi startApiWithAgentSessions(
+      Path root,
+      String projectId,
+      String apiToken,
+      String imageVersion,
+      String reportedBy,
+      List<HarnessCapabilities> capabilities,
+      List<Command> commands,
+      List<AgentSessionStore.Stat> stats) {
+    Wiring wiring = new Wiring();
+    seed(wiring.store, commands, Map.of());
+    AgentSessionStore sessionStore = new AgentSessionStore();
+    sessionStore.replace(
+        stats.stream().map(AgentSessionStore.Stat::sessionId).distinct().toList(), stats);
+    wiring.agentSessions = new AgentSessionQueryService(wiring.store, sessionStore);
+    return start(root, projectId, apiToken, imageVersion, reportedBy, capabilities, true, wiring);
+  }
+
+  /**
+   * The API with its agent surface wired (as {@link #startApi}) inside the grace window for qits'
+   * session credentials: {@code POST /agents} answers 503 with a {@code Retry-After} and launches
+   * nothing. The window's clock never moves, so it never closes while the state runs.
+   */
+  public static RunningApi startApiAwaitingSessionCredentials(
+      Path root,
+      String projectId,
+      String apiToken,
+      String imageVersion,
+      String reportedBy,
+      List<HarnessCapabilities> capabilities) {
+    Wiring wiring = new Wiring();
+    SessionCredentialStore credentials = new SessionCredentialStore(() -> "", () -> "", () -> 0L);
+    credentials.openWindow(Duration.ofMinutes(5));
+    wiring.sessionCredentials = credentials;
+    return start(root, projectId, apiToken, imageVersion, reportedBy, capabilities, true, wiring);
+  }
+
+  /** What a state wires beyond the defaults: an empty store, no actions, no session tree. */
+  private static final class Wiring {
+    final CommandStore store = new CommandStore();
+    ActionResolver actions = new NoDeclaredActions();
+    AgentSessionQueryService agentSessions;
+    SessionCredentialStore sessionCredentials;
+  }
+
+  private static void seed(
+      CommandStore store, List<Command> commands, Map<String, List<CommandLogLine>> logs) {
+    for (Command command : commands) {
+      store.put(command);
+    }
+    logs.forEach((commandId, lines) -> lines.forEach(store.log(commandId)::append));
+  }
+
+  /** An action resolver declaring exactly {@code actions}. */
+  private record DeclaredActions(List<ActionResolver.ResolvedAction> actions)
+      implements ActionResolver {
+
+    DeclaredActions {
+      actions = List.copyOf(actions);
+    }
+
+    @Override
+    public Optional<ResolvedAction> resolve(String actionId) {
+      return actions.stream().filter(action -> action.id().equals(actionId)).findFirst();
+    }
+  }
+
   private static RunningApi start(
       Path root,
       String projectId,
@@ -131,14 +238,15 @@ public final class ContractSeams {
       String imageVersion,
       String reportedBy,
       List<HarnessCapabilities> capabilities,
-      boolean wireAgents) {
+      boolean wireAgents,
+      Wiring wiring) {
     Vertx vertx = Vertx.vertx();
     ProjectsApi api = new ProjectsApi();
     api.vertx = vertx;
     api.apiBasePath = Optional.of("/projects/container/" + projectId);
     ProjectContext project =
         new DaemonProjectContext(projectId, "qits-qits", () -> "main", () -> "0123456");
-    CommandStore store = new CommandStore();
+    CommandStore store = wiring.store;
     CommandRegistry registry = new CommandRegistry(root, 2_000);
     api.wireCommands(
         new CommandService(
@@ -147,7 +255,7 @@ public final class ContractSeams {
             new CommandLifecycleService(store, null),
             new CommandLogService(store, null),
             project,
-            new NoDeclaredActions()),
+            wiring.actions),
         registry,
         project);
     DaemonAgentDefaults defaults = new DaemonAgentDefaults(Optional.of("CLAUDE"), false);
@@ -155,11 +263,14 @@ public final class ContractSeams {
       api.wireAgents(
           new eu.wohlben.qits.agents.AgentLaunchService(
               null, null, null, null, defaults, null, project, null, 0),
-          null,
+          wiring.agentSessions,
           defaults,
           capabilities,
           imageVersion,
           reportedBy);
+    }
+    if (wiring.sessionCredentials != null) {
+      api.wireSessions(wiring.sessionCredentials);
     }
     try {
       api.listen(vertx, "127.0.0.1", 0, apiToken)
@@ -171,6 +282,6 @@ public final class ContractSeams {
       vertx.close();
       throw new IllegalStateException("The daemon API did not bind", e);
     }
-    return new RunningApi(vertx, api);
+    return new RunningApi(vertx, api, registry);
   }
 }

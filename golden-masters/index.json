@@ -3,6 +3,156 @@
   "provider": "qits-projects-daemon",
   "states": [
     {
+      "name": "a daemon that drove one agent session",
+      "slug": "a-daemon-that-drove-one-agent-session",
+      "params": {
+        "apiToken": "daemon-api-token",
+        "projectId": "00000000-0000-4000-8000-000000000001"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "listAgentSessions",
+          "method": "GET",
+          "path": "/projects/container/{projectId}/agent-sessions",
+          "status": 200,
+          "file": "a-daemon-that-drove-one-agent-session/listAgentSessions.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "a daemon that ran one command",
+      "slug": "a-daemon-that-ran-one-command",
+      "params": {
+        "apiToken": "daemon-api-token",
+        "commandId": "00000000-0000-4000-8000-00000000c001",
+        "projectId": "00000000-0000-4000-8000-000000000001"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "getCommand",
+          "method": "GET",
+          "path": "/projects/container/{projectId}/commands/{commandId}",
+          "status": 200,
+          "file": "a-daemon-that-ran-one-command/getCommand.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "getCommandLog",
+          "method": "GET",
+          "path": "/projects/container/{projectId}/commands/{commandId}/log",
+          "status": 200,
+          "file": "a-daemon-that-ran-one-command/getCommandLog.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "launchCommand",
+          "method": "POST",
+          "path": "/projects/container/{projectId}/commands",
+          "body": {
+            "actionId": "check"
+          },
+          "status": 200,
+          "file": "a-daemon-that-ran-one-command/launchCommand.json",
+          "frozen": {
+            "ids": [
+              "$.command.id",
+              "$.command.projectId"
+            ],
+            "instants": [
+              "$.command.launchedAt"
+            ],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "listCommandActions",
+          "method": "GET",
+          "path": "/projects/container/{projectId}/commands/actions",
+          "status": 200,
+          "file": "a-daemon-that-ran-one-command/listCommandActions.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "listCommands",
+          "method": "GET",
+          "path": "/projects/container/{projectId}/commands",
+          "status": 200,
+          "file": "a-daemon-that-ran-one-command/listCommands.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "terminateCommand",
+          "method": "POST",
+          "path": "/projects/container/{projectId}/commands/{commandId}/terminate",
+          "status": 200,
+          "file": "a-daemon-that-ran-one-command/terminateCommand.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "a daemon waiting for session credentials",
+      "slug": "a-daemon-waiting-for-session-credentials",
+      "params": {
+        "apiToken": "daemon-api-token",
+        "projectId": "00000000-0000-4000-8000-000000000001"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "launchAgent",
+          "method": "POST",
+          "path": "/projects/container/{projectId}/agents",
+          "body": {
+            "scope": "REPOSITORY",
+            "surface": "project.work"
+          },
+          "status": 503,
+          "file": "a-daemon-waiting-for-session-credentials/launchAgent.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
+    },
+    {
       "name": "a daemon whose agents are not wired yet",
       "slug": "a-daemon-whose-agents-are-not-wired-yet",
       "params": {
@@ -12,11 +162,44 @@
       "dependsOn": [],
       "operations": [
         {
+          "operationId": "launchAgent",
+          "method": "POST",
+          "path": "/projects/container/{projectId}/agents",
+          "body": {
+            "scope": "REPOSITORY",
+            "surface": "project.work"
+          },
+          "status": 503,
+          "file": "a-daemon-whose-agents-are-not-wired-yet/launchAgent.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        },
+        {
           "operationId": "listAvailableAgents",
           "method": "GET",
           "path": "/projects/container/{projectId}/agents/available",
           "status": 503,
           "file": "a-daemon-whose-agents-are-not-wired-yet/listAvailableAgents.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "openAgentSignIn",
+          "method": "POST",
+          "path": "/projects/container/{projectId}/agents/sign-in",
+          "body": {
+            "agentType": "CLAUDE"
+          },
+          "status": 503,
+          "file": "a-daemon-whose-agents-are-not-wired-yet/openAgentSignIn.json",
           "frozen": {
             "ids": [],
             "instants": [],

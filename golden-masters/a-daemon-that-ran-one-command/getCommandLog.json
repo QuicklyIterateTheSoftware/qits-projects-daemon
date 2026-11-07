@@ -1,0 +1,22 @@
+{
+  "lines": [
+    {
+      "sequence": 1,
+      "channel": "OUTPUT",
+      "content": "Checking qits-qits",
+      "timestamp": "2026-10-01T12:00:01Z"
+    },
+    {
+      "sequence": 2,
+      "channel": "OUTPUT",
+      "content": "All checks passed",
+      "timestamp": "2026-10-01T12:00:02Z"
+    },
+    {
+      "sequence": 3,
+      "channel": "OUTPUT",
+      "content": "Done",
+      "timestamp": "2026-10-01T12:00:03Z"
+    }
+  ]
+}
