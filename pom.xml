@@ -67,7 +67,7 @@
         <!-- The platform's shared rules, test scope only (qits-1754). ProviderStateCoverageTest is
              what this repo takes it for. Published by qits-integrations-quarkus into the same
              platform Maven repository as the coordinates above. -->
-        <qits.arch-rules.version>2026.1106.507</qits.arch-rules.version>
+        <qits.arch-rules.version>2026.1108.20205</qits.arch-rules.version>
     </properties>
 
     <dependencyManagement>
