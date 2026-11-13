@@ -102,8 +102,8 @@ final class SessionLadder {
 
     /**
      * The session this key recorded in an earlier daemon process, or null — read once, at the
-     * ladder's first attempt, as its previous session. Only the front desk keeps a record ({@link
-     * FrontDeskSessionRecord}). Must not throw.
+     * ladder's first attempt, as its previous session. Only the front desk and the named agents
+     * keep a record ({@link FrontDeskSessionRecord}). Must not throw.
      */
     default String recordedSession() {
       return null;

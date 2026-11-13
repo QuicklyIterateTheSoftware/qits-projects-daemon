@@ -12,6 +12,7 @@ import eu.wohlben.qits.commands.CommandRegistry;
 import eu.wohlben.qits.commands.CommandStore;
 import eu.wohlben.qits.projectsdaemon.protocol.DaemonMessage;
 import eu.wohlben.qits.projectsdaemon.protocol.DaemonProtocol.ReportedState;
+import eu.wohlben.qits.projectsdaemon.protocol.NamedAgents;
 import eu.wohlben.qits.projectsdaemon.protocol.SessionCredentials;
 import eu.wohlben.qits.projectsdaemon.protocol.SessionReport;
 import eu.wohlben.qits.projectsdaemon.protocol.Sessions;
@@ -26,6 +27,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.LongSupplier;
 import org.jboss.logging.Logger;
 
@@ -47,6 +49,13 @@ import org.jboss.logging.Logger;
  *       legacy fallback for a key, so a refinement never runs as the container. A frame that changes
  *       a running key's entity renames its session in place ({@code setEntity}); one that stops or
  *       drops the key terminates the session and forgets the entity ({@code forgetEntity}).
+ *   <li><b>A named agent's key</b>, {@code agent:<name>} ({@link NamedAgents}, qits-2154), climbs
+ *       the same ladder: an interactive {@code REPOSITORY}-scoped session of its entry's own surface
+ *       ({@code project.ui-builder}), with no entity, on its key's credential only. Its surface is
+ *       never the desk's {@code project.work}, so the front desk's {@code holdOff} — which waits on a
+ *       live {@code project.work} session — never sees it. Unlike a refinement it keeps a session
+ *       record on the claude volume ({@link FrontDeskSessionRecord#ofNamedAgent}), its resume when
+ *       qits names none, and {@link #namedAgents} is what the API's {@code /named-agents} reads.
  * </ul>
  *
  * <p><b>Until the first {@link Sessions} frame nothing here does anything</b>: a capability-2 qits
@@ -201,6 +210,7 @@ final class SessionKeeper {
   private final Scheduler scheduler;
   private final LongSupplier clock;
   private final Consumer<DaemonMessage> send;
+  private final Function<String, FrontDeskSessionRecord> records;
 
   /** The entity ladders, by key, in the last frame's order. Touched only on the scheduler. */
   private final Map<String, Keyed> keyed = new LinkedHashMap<>();
@@ -236,6 +246,31 @@ final class SessionKeeper {
       Scheduler scheduler,
       LongSupplier clock,
       Consumer<DaemonMessage> send) {
+    this(
+        frontDesk,
+        credentials,
+        desk,
+        timing,
+        scheduler,
+        clock,
+        send,
+        key -> FrontDeskSessionRecord.NONE);
+  }
+
+  /**
+   * The multiplex whose ladders keep the session record {@code records} names for their key —
+   * {@link FrontDeskSessionRecord#NONE} for a key that keeps none (every refinement).
+   */
+  SessionKeeper(
+      FrontDeskKeeper frontDesk,
+      SessionCredentialStore credentials,
+      Desk desk,
+      Timing timing,
+      Scheduler scheduler,
+      LongSupplier clock,
+      Consumer<DaemonMessage> send,
+      Function<String, FrontDeskSessionRecord> records) {
+    this.records = records == null ? key -> FrontDeskSessionRecord.NONE : records;
     this.frontDesk = frontDesk;
     this.credentials = credentials;
     this.desk = desk;
@@ -296,6 +331,34 @@ final class SessionKeeper {
   /** Report the current state again — the control socket reconnected. Nothing before a frame. */
   void reportCurrent() {
     sendReport();
+  }
+
+  /**
+   * Every named agent the last {@code sessions} frame names (qits-2154), in its order, with the
+   * state the report gives its key — empty before the first frame. Readable from any thread: it
+   * reads only the frame and the reported states, never a ladder.
+   */
+  List<NamedAgentHost.Agent> namedAgents() {
+    List<Sessions.Session> wanted = desired;
+    if (wanted == null) {
+      return List.of();
+    }
+    List<NamedAgentHost.Agent> agents = new ArrayList<>();
+    for (Sessions.Session session : wanted) {
+      Optional<String> name = NamedAgents.namedAgentName(session.key());
+      if (name.isPresent()) {
+        SessionReport.Session state = stateOf(session.key(), session.running());
+        agents.add(
+            new NamedAgentHost.Agent(
+                name.get(),
+                session.key(),
+                session.surface(),
+                state.state(),
+                state.commandId(),
+                state.sessionId()));
+      }
+    }
+    return agents;
   }
 
   /** The session key whose ladder launched {@code commandId}, or null for any other command. */
@@ -412,11 +475,16 @@ final class SessionKeeper {
     final String key;
     final SessionLadder ladder;
 
+    /** The key's session record: a named agent's own, {@link FrontDeskSessionRecord#NONE} else. */
+    final FrontDeskSessionRecord record;
+
     /** The last frame's entry for the key; null once qits dropped it. Scheduler thread only. */
     Sessions.Session desired;
 
     Keyed(String key) {
       this.key = key;
+      FrontDeskSessionRecord own = records.apply(key);
+      this.record = own == null ? FrontDeskSessionRecord.NONE : own;
       this.ladder =
           new SessionLadder(
               this, desk, timing, scheduler, clock, send, SessionKeeper.this::onReport);
@@ -495,6 +563,17 @@ final class SessionKeeper {
     public String preferredResume() {
       Sessions.Session entry = desired;
       return entry == null ? null : entry.resumeSessionId();
+    }
+
+    /** A named agent resumes what it recorded when qits names nothing; a refinement records none. */
+    @Override
+    public String recordedSession() {
+      return record.read();
+    }
+
+    @Override
+    public void recordSession(String sessionId) {
+      record.write(sessionId);
     }
 
     @Override

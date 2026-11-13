@@ -1,5 +1,6 @@
 package eu.wohlben.qits.projectsdaemon;
 
+import eu.wohlben.qits.projectsdaemon.protocol.NamedAgents;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
@@ -24,7 +25,13 @@ import org.jboss.logging.Logger;
  * 0644}, and only when the id changed. Nothing here throws: a record that cannot be read or written
  * costs one WARN, and the desk falls back to what qits names, as before.
  *
- * <p>Read and written on the front desk's ladder thread only ({@link
+ * <p><b>A named agent keeps one too</b> (qits-2154), at {@code
+ * <claudeMount>/.qits/named-agents/<projectId>/<name>.session} ({@link #ofNamedAgent}): it is a kept
+ * session qits resumes the same way, and it loses its id to the same outage. Same file format, same
+ * rules; only the path and the log's noun differ. A refinement key keeps none ({@link
+ * #forSessionKey}).
+ *
+ * <p>Read and written on the owning ladder's thread only ({@link
  * SessionLadder.Spec#recordedSession}, {@link SessionLadder.Spec#recordSession}).
  */
 final class FrontDeskSessionRecord {
@@ -35,17 +42,21 @@ final class FrontDeskSessionRecord {
   private static final Pattern SEGMENT = Pattern.compile("[A-Za-z0-9_-][A-Za-z0-9._-]*");
 
   /** Records nothing and remembers nothing: tests, and a daemon without a project id or mount. */
-  static final FrontDeskSessionRecord NONE = new FrontDeskSessionRecord(null);
+  static final FrontDeskSessionRecord NONE = new FrontDeskSessionRecord(null, "front desk");
 
   private final Path path;
+
+  /** Whose record it is, for the log: {@code front desk} or {@code named agent <name>}. */
+  private final String owner;
 
   /** The id the file holds, as last read or written; null when unknown or none. */
   private String current;
 
   private boolean warned;
 
-  private FrontDeskSessionRecord(Path path) {
+  private FrontDeskSessionRecord(Path path, String owner) {
     this.path = path;
+    this.owner = owner;
   }
 
   /** {@code projectId}'s desk record under {@code claudeMount}; {@link #NONE} without both. */
@@ -59,9 +70,37 @@ final class FrontDeskSessionRecord {
     return at(Path.of(claudeMount, ".qits", "front-desk", projectId + ".session"));
   }
 
+  /**
+   * The named agent {@code name}'s record under {@code claudeMount}, at {@code
+   * .qits/named-agents/<projectId>/<name>.session}; {@link #NONE} without a mount, a plain project
+   * id or a {@linkplain NamedAgents#validName valid name}.
+   */
+  static FrontDeskSessionRecord ofNamedAgent(String claudeMount, String projectId, String name) {
+    if (claudeMount == null
+        || claudeMount.isBlank()
+        || projectId == null
+        || !SEGMENT.matcher(projectId).matches()
+        || !NamedAgents.validName(name)) {
+      return NONE;
+    }
+    return new FrontDeskSessionRecord(
+        Path.of(claudeMount, ".qits", "named-agents", projectId, name + ".session"),
+        "named agent " + name);
+  }
+
+  /**
+   * The record the multiplex keeps for session key {@code key}: a named agent's own ({@link
+   * #ofNamedAgent}), {@link #NONE} for every other key — a refinement resumes only what qits names.
+   */
+  static FrontDeskSessionRecord forSessionKey(String claudeMount, String projectId, String key) {
+    return NamedAgents.namedAgentName(key)
+        .map(name -> ofNamedAgent(claudeMount, projectId, name))
+        .orElse(NONE);
+  }
+
   /** The record at {@code path}. */
   static FrontDeskSessionRecord at(Path path) {
-    return new FrontDeskSessionRecord(path);
+    return new FrontDeskSessionRecord(path, "front desk");
   }
 
   /** The file this record lives in, or null for {@link #NONE}. */
@@ -114,7 +153,7 @@ final class FrontDeskSessionRecord {
       }
       temp = null;
       current = sessionId;
-      LOG.debugf("Recorded the front desk's session %s at %s", sessionId, path);
+      LOG.debugf("Recorded the %s's session %s at %s", owner, sessionId, path);
     } catch (IOException | RuntimeException e) {
       warnOnce("write", e);
     } finally {
@@ -130,13 +169,13 @@ final class FrontDeskSessionRecord {
 
   private void warnOnce(String what, Exception e) {
     if (warned) {
-      LOG.debugf("Could not %s the front desk's session record %s: %s", what, path, e.getMessage());
+      LOG.debugf("Could not %s the %s's session record %s: %s", what, owner, path, e.getMessage());
       return;
     }
     warned = true;
     LOG.warnf(
-        "Could not %s the front desk's session record %s (%s); a new daemon process resumes only"
+        "Could not %s the %s's session record %s (%s); a new daemon process resumes only"
             + " what qits names",
-        what, path, e.getMessage());
+        what, owner, path, e.getMessage());
   }
 }

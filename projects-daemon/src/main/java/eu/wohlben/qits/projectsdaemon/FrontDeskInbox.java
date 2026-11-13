@@ -9,7 +9,9 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
@@ -39,6 +41,13 @@ import org.jboss.logging.Logger;
  *
  * <p><b>The only writer the daemon has.</b> Nothing else types into the desk on a schedule
  * (qits-1597): every inbox write holds one monitor, so two prompts never interleave keystrokes.
+ *
+ * <p><b>One per named agent, too</b> (qits-2154, {@link NamedAgentHost}): the same class over that
+ * agent's kept command instead of the desk's, with one difference the desk never has — a named
+ * agent is started <em>by</em> its first prompt, so while its key is wanted and its session is still
+ * launching ({@code launching}) a prompt is queued rather than refused, and the new session's first
+ * {@code IDLE} types it. The desk's inbox is built with {@code launching} always false, so its
+ * behaviour is exactly what it was.
  */
 final class FrontDeskInbox {
 
@@ -77,6 +86,8 @@ final class FrontDeskInbox {
   record Answer(String commandId, String sessionId, String state, String text, String at) {}
 
   private final Supplier<Optional<String>> frontDesk;
+  private final BooleanSupplier launching;
+  private final String label;
   private final DeliveryKeeper.Session session;
   private final Function<String, List<String>> transcript;
   private final Scheduler scheduler;
@@ -100,7 +111,28 @@ final class FrontDeskInbox {
       Function<String, List<String>> transcript,
       Scheduler scheduler,
       LongSupplier clock) {
-    this.frontDesk = frontDesk;
+    this(frontDesk, () -> false, "Front desk", session, transcript, scheduler, clock);
+  }
+
+  /**
+   * An inbox over any kept command — a named agent's (qits-2154).
+   *
+   * @param target the kept command prompts go to, empty while none runs
+   * @param launching whether the session is wanted and still launching: a prompt then queues for
+   *     its first {@code IDLE} instead of being refused {@link Kind#NO_DESK}
+   * @param label how the log names it ({@code Front desk}, {@code Named agent ui-builder})
+   */
+  FrontDeskInbox(
+      Supplier<Optional<String>> target,
+      BooleanSupplier launching,
+      String label,
+      DeliveryKeeper.Session session,
+      Function<String, List<String>> transcript,
+      Scheduler scheduler,
+      LongSupplier clock) {
+    this.frontDesk = target;
+    this.launching = launching;
+    this.label = label;
     this.session = session;
     this.transcript = transcript;
     this.scheduler = scheduler;
@@ -112,7 +144,17 @@ final class FrontDeskInbox {
     synchronized (lock) {
       Optional<String> kept = frontDesk.get();
       if (kept.isEmpty() || !session.running(kept.get())) {
-        return new Outcome(Kind.NO_DESK, null, null, null);
+        if (!launching.getAsBoolean()) {
+          return new Outcome(Kind.NO_DESK, null, null, null);
+        }
+        // Wanted and not up yet: the turn waits for the session's first IDLE, like a busy one's.
+        if (queue.size() >= CAPACITY) {
+          LOG.infof("%s prompt refused: the inbox is full (%d turns).", label, CAPACITY);
+          return new Outcome(Kind.FULL, null, null, null);
+        }
+        queue.addLast(text);
+        LOG.debugf("%s prompt queued at %d while it launches.", label, queue.size());
+        return new Outcome(Kind.QUEUED, null, null, queue.size());
       }
       String commandId = kept.get();
       String state = session.activityState(commandId).orElse(null);
@@ -120,7 +162,7 @@ final class FrontDeskInbox {
         GuardedInput written = session.send(commandId, text);
         if (written == GuardedInput.WRITTEN) {
           typedAt = clock.getAsLong();
-          LOG.debugf("Front desk prompt typed into %s.", commandId);
+          LOG.debugf("%s prompt typed into %s.", label, commandId);
           return new Outcome(Kind.DELIVERED, commandId, state, null);
         }
         if (written == GuardedInput.NOT_RUNNING) {
@@ -129,11 +171,11 @@ final class FrontDeskInbox {
         // Held for a person's draft: it waits its turn like a busy desk's would.
       }
       if (queue.size() >= CAPACITY) {
-        LOG.infof("Front desk prompt refused: the inbox is full (%d turns).", CAPACITY);
+        LOG.infof("%s prompt refused: the inbox is full (%d turns).", label, CAPACITY);
         return new Outcome(Kind.FULL, commandId, state, null);
       }
       queue.addLast(text);
-      LOG.debugf("Front desk prompt queued at %d (desk %s).", queue.size(), state);
+      LOG.debugf("%s prompt queued at %d (desk %s).", label, queue.size(), state);
       return new Outcome(Kind.QUEUED, commandId, state, queue.size());
     }
   }
@@ -178,9 +220,9 @@ final class FrontDeskInbox {
         queue.removeFirst();
         typedAt = clock.getAsLong();
         LOG.debugf(
-            "Front desk queued turn typed into %s; %d still queued.", commandId, queue.size());
+            "%s queued turn typed into %s; %d still queued.", label, commandId, queue.size());
       } else {
-        LOG.debugf("Front desk queued turn kept: %s.", written);
+        LOG.debugf("%s queued turn kept: %s.", label, written);
       }
     }
   }
@@ -216,16 +258,24 @@ final class FrontDeskInbox {
     if (kept.isEmpty()) {
       return Optional.empty();
     }
-    String commandId = kept.get();
+    return Optional.of(answerFor(kept.get()));
+  }
+
+  /**
+   * {@code commandId}'s latest answer, whether or not it is the kept command now — a named agent's
+   * last session after it stopped ({@link NamedAgentHost}).
+   */
+  Answer answerFor(String commandId) {
     String state = session.activityState(commandId).orElse(null);
     List<String> lines;
     try {
       lines = transcript.apply(commandId);
     } catch (RuntimeException e) {
-      LOG.debugf("Could not read the front desk transcript: %s", e.getMessage());
+      LOG.debugf(
+          "Could not read the %s transcript: %s", label.toLowerCase(Locale.ROOT), e.getMessage());
       lines = List.of();
     }
-    return Optional.of(answerOf(commandId, state, lines == null ? List.of() : lines));
+    return answerOf(commandId, state, lines == null ? List.of() : lines);
   }
 
   /**

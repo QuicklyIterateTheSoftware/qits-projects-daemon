@@ -101,6 +101,12 @@ class SessionKeeperTest {
     final List<String> forgotten = new ArrayList<>();
     boolean transcriptPresent = true;
 
+    /**
+     * Answer {@link #liveSessionExists} as production does — any running {@code project.work}
+     * session that is not the keeper's own — instead of never.
+     */
+    boolean countsLiveDeskSurfaceSessions;
+
     @Override
     public Command launch(AgentLaunchRequest request) {
       launches.add(request);
@@ -138,7 +144,12 @@ class SessionKeeperTest {
 
     @Override
     public boolean liveSessionExists() {
-      return false; // nobody else's desk: these tests are about the multiplex
+      if (!countsLiveDeskSurfaceSessions) {
+        return false; // nobody else's desk: these tests are about the multiplex
+      }
+      return commands.values().stream()
+          .filter(Command::isRunning)
+          .anyMatch(command -> FrontDeskKeeper.SURFACE.key().equals(command.agentSurface()));
     }
 
     @Override
@@ -695,5 +706,159 @@ class SessionKeeperTest {
     advance(TIMING.pollMs() * 3);
     assertEquals(1, desk.launches.size(), "the delivery loop needs its desk");
     assertTrue(desk.terminated.isEmpty());
+  }
+
+  // --- named agents (qits-2154) ---------------------------------------------------------------
+
+  private static final String UI_BUILDER = "agent:ui-builder";
+
+  /**
+   * A known surface that is not the desk's. The pilot's {@code project.ui-builder} reaches the
+   * daemon only with the qits-coding-agents bump that lists it, and the daemon passes the string
+   * through either way.
+   */
+  private static final String AGENT_SURFACE = "project.delivery";
+
+  private static Sessions.Session deskEntry() {
+    return new Sessions.Session(
+        SessionCredentials.FRONT_DESK_KEY, "project.work", "RUNNING", null, null);
+  }
+
+  @Test
+  void aNamedAgentRunsOnItsOwnSurfaceAndCredentialWithNoEntity() {
+    credentialsFor(SessionCredentials.FRONT_DESK_KEY, UI_BUILDER);
+    startBoth();
+    frame(deskEntry(), new Sessions.Session(UI_BUILDER, AGENT_SURFACE, "RUNNING", null, null));
+
+    assertEquals(
+        new AgentLaunchRequest(
+                AgentMcpScope.REPOSITORY,
+                AgentSurface.of(AGENT_SURFACE),
+                AgentLaunchMode.INTERACTIVE,
+                null,
+                null,
+                false,
+                false,
+                null,
+                null,
+                overlay(UI_BUILDER))
+            .withSessionKey(UI_BUILDER, null, null),
+        desk.launchesFor(UI_BUILDER).getFirst());
+    Command agent = desk.running(UI_BUILDER).orElseThrow();
+    Command kept = desk.running(SessionCredentials.FRONT_DESK_KEY).orElseThrow();
+    assertEquals(kept.id(), frontDesk.keptCommandId().orElseThrow(), "the desk is the keeper's");
+    assertEquals(UI_BUILDER, keeper.sessionKeyOf(agent.id()));
+    assertEquals("RUNNING", state(UI_BUILDER));
+    assertEquals("RUNNING", state(SessionCredentials.FRONT_DESK_KEY));
+
+    assertEquals(
+        List.of(
+            new NamedAgentHost.Agent(
+                "ui-builder",
+                UI_BUILDER,
+                AGENT_SURFACE,
+                "RUNNING",
+                agent.id(),
+                agent.currentSession().sessionId())),
+        keeper.namedAgents());
+
+    frame(deskEntry(), new Sessions.Session(UI_BUILDER, AGENT_SURFACE, "STOPPED", null, null));
+    advance(TIMING.pollMs() * 2);
+    assertEquals(List.of(agent.id()), desk.terminated, "stopping the agent leaves the desk alone");
+    assertEquals(
+        List.of(new NamedAgentHost.Agent("ui-builder", UI_BUILDER, AGENT_SURFACE, "STOPPED", null, null)),
+        keeper.namedAgents());
+    assertTrue(desk.running(SessionCredentials.FRONT_DESK_KEY).isPresent());
+  }
+
+  @Test
+  void onlyNamedAgentKeysAreListedAsNamedAgents() {
+    credentialsFor(A);
+    startBoth();
+    assertTrue(keeper.namedAgents().isEmpty(), "nothing before a frame");
+    frame(deskEntry(), refinement(A, "RUNNING", entity("qits-1", "REPORTED")));
+    assertTrue(keeper.namedAgents().isEmpty());
+    frame(new Sessions.Session(UI_BUILDER, AGENT_SURFACE, "RUNNING", null, null));
+    assertEquals("FAILED", keeper.namedAgents().getFirst().state(), "no credential: fails closed");
+  }
+
+  /**
+   * The desk's {@code holdOff} waits on a live {@code project.work} session; a named agent on its own
+   * surface is not one, so the desk launches beside it — and one on the desk's surface would hold
+   * it, which is why a named agent never runs on {@code project.work}.
+   */
+  @Test
+  void aNamedAgentNeverHoldsTheDesksLaunchBack() {
+    desk.countsLiveDeskSurfaceSessions = true;
+    credentialsFor(SessionCredentials.FRONT_DESK_KEY, UI_BUILDER, "agent:on-the-desk-surface");
+    startBoth();
+    frame(new Sessions.Session(UI_BUILDER, AGENT_SURFACE, "RUNNING", null, null));
+    assertTrue(desk.running(UI_BUILDER).isPresent());
+
+    frame(deskEntry(), new Sessions.Session(UI_BUILDER, AGENT_SURFACE, "RUNNING", null, null));
+    advance(TIMING.pollMs());
+    assertTrue(desk.running(SessionCredentials.FRONT_DESK_KEY).isPresent(), "the desk launched");
+    assertEquals("RUNNING", state(SessionCredentials.FRONT_DESK_KEY));
+
+    // The contrast: the same agent on project.work would be a live desk-surface session.
+    frame(
+        new Sessions.Session(UI_BUILDER, AGENT_SURFACE, "RUNNING", null, null),
+        new Sessions.Session("agent:on-the-desk-surface", "project.work", "RUNNING", null, null));
+    advance(TIMING.pollMs() * 2);
+    assertTrue(desk.running(SessionCredentials.FRONT_DESK_KEY).isEmpty());
+    frame(
+        deskEntry(),
+        new Sessions.Session(UI_BUILDER, AGENT_SURFACE, "RUNNING", null, null),
+        new Sessions.Session("agent:on-the-desk-surface", "project.work", "RUNNING", null, null));
+    advance(TIMING.pollMs() * 2);
+    assertEquals("STARTING", state(SessionCredentials.FRONT_DESK_KEY));
+    assertTrue(desk.running(SessionCredentials.FRONT_DESK_KEY).isEmpty());
+  }
+
+  @Test
+  void aNamedAgentResumesItsRecordedSessionWhenQitsNamesNone(@TempDir Path mount)
+      throws Exception {
+    String recorded = "77777777-7777-7777-7777-777777777777";
+    FrontDeskSessionRecord record =
+        FrontDeskSessionRecord.ofNamedAgent(mount.toString(), "p-1", "ui-builder");
+    Files.createDirectories(record.path().getParent());
+    Files.writeString(record.path(), recorded + "\n");
+    SessionKeeper multiplex =
+        new SessionKeeper(
+            frontDesk,
+            credentials,
+            desk,
+            TIMING,
+            scheduler,
+            () -> now,
+            sent::add,
+            key -> FrontDeskSessionRecord.forSessionKey(mount.toString(), "p-1", key));
+    credentialsFor(UI_BUILDER, A);
+    multiplex.start();
+    multiplex.apply(
+        new Sessions(
+            List.of(
+                new Sessions.Session(UI_BUILDER, AGENT_SURFACE, "RUNNING", null, null),
+                refinement(A, "RUNNING", entity("qits-1", "REPORTED")))));
+    advance(0);
+
+    assertEquals(recorded, desk.launchesFor(UI_BUILDER).getFirst().resumeSessionId());
+    assertNull(desk.launchesFor(A).getFirst().resumeSessionId(), "a refinement keeps no record");
+
+    // qits' id comes first, and the session the agent runs is what the record holds from then on.
+    String named = "88888888-8888-8888-8888-888888888888";
+    multiplex.apply(
+        new Sessions(
+            List.of(new Sessions.Session(UI_BUILDER, AGENT_SURFACE, "STOPPED", null, null))));
+    advance(TIMING.pollMs() * 2);
+    multiplex.apply(
+        new Sessions(
+            List.of(new Sessions.Session(UI_BUILDER, AGENT_SURFACE, "RUNNING", named, null))));
+    advance(0);
+    assertEquals(named, desk.launchesFor(UI_BUILDER).getLast().resumeSessionId());
+    assertEquals(named, Files.readString(record.path()).strip());
+    try (Stream<Path> files = Files.list(record.path().getParent())) {
+      assertEquals(List.of(record.path()), files.toList(), "one record, the agent's");
+    }
   }
 }
