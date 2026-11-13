@@ -441,4 +441,173 @@ class ProjectsApiTest {
     assertEquals(404, none.status());
     assertTrue(none.body().containsKey("reason"));
   }
+
+  // --- the named agents (qits-2154) -------------------------------------------------------------
+
+  /** The roster the named-agent routes read: what the frame names, as the report places it. */
+  private List<NamedAgentHost.Agent> roster =
+      List.of(
+          new NamedAgentHost.Agent(
+              "ui-builder", "agent:ui-builder", "project.ui-builder", "RUNNING", "cmd-ui", "sess-ui"));
+
+  private final Map<String, String> agentStates = new java.util.HashMap<>();
+  private final List<String> typedToAgents = new java.util.ArrayList<>();
+
+  private void wireNamedAgents() {
+    DeliveryKeeper.Session session =
+        new DeliveryKeeper.Session() {
+          @Override
+          public boolean running(String commandId) {
+            return "cmd-ui".equals(commandId);
+          }
+
+          @Override
+          public Optional<String> activityState(String commandId) {
+            return Optional.ofNullable(agentStates.get(commandId));
+          }
+
+          @Override
+          public eu.wohlben.qits.commands.GuardedInput send(String commandId, String text) {
+            typedToAgents.add(commandId + ":" + text);
+            return eu.wohlben.qits.commands.GuardedInput.WRITTEN;
+          }
+        };
+    api.wireNamedAgents(
+        new NamedAgentHost(
+            () -> roster,
+            session,
+            commandId ->
+                List.of(
+                    "{\"type\":\"user\",\"sessionId\":\"sess-ui\",\"message\":{\"content\":\"hi\"}}",
+                    "{\"type\":\"assistant\",\"sessionId\":\"sess-ui\","
+                        + "\"timestamp\":\"2026-11-13T10:00:00Z\","
+                        + "\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"built\"}]}}"),
+            new SessionKeeper.Scheduler() {
+              @Override
+              public void schedule(Runnable step, long delayMs) {
+                step.run();
+              }
+
+              @Override
+              public void shutdown() {}
+            },
+            System::currentTimeMillis));
+  }
+
+  @Test
+  void theNamedAgentsAnswer503UntilWiredAndAreGated() {
+    assertEquals(503, get(BASE + "/named-agents", TOKEN).status());
+    assertEquals(503, get(BASE + "/named-agents/ui-builder/last-answer", TOKEN).status());
+    assertEquals(401, get(BASE + "/named-agents", null).status(), "and is gated");
+    wireNamedAgents();
+    assertEquals(401, get(BASE + "/named-agents/ui-builder/last-answer", null).status());
+  }
+
+  @Test
+  void theNamedAgentsAreListedWithTheirReportedState() {
+    wireNamedAgents();
+    Answer list = get(BASE + "/named-agents", TOKEN);
+    assertEquals(200, list.status());
+    assertEquals(
+        new JsonObject()
+            .put(
+                "agents",
+                new io.vertx.core.json.JsonArray()
+                    .add(
+                        new JsonObject()
+                            .put("name", "ui-builder")
+                            .put("key", "agent:ui-builder")
+                            .put("surface", "project.ui-builder")
+                            .put("state", "RUNNING")
+                            .put("commandId", "cmd-ui")
+                            .put("sessionId", "sess-ui"))),
+        list.body());
+
+    roster =
+        List.of(
+            new NamedAgentHost.Agent(
+                "ui-builder", "agent:ui-builder", "project.ui-builder", "STOPPED", null, null));
+    JsonObject stopped =
+        get(BASE + "/named-agents", TOKEN).body().getJsonArray("agents").getJsonObject(0);
+    assertEquals("STOPPED", stopped.getString("state"));
+    assertTrue(stopped.containsKey("commandId") && stopped.getValue("commandId") == null);
+    assertTrue(stopped.containsKey("sessionId") && stopped.getValue("sessionId") == null);
+
+    roster = List.of();
+    assertEquals(
+        new JsonObject().put("agents", new io.vertx.core.json.JsonArray()),
+        get(BASE + "/named-agents", TOKEN).body());
+  }
+
+  @Test
+  void aNamedAgentPromptIsTheDesksContractForThatAgent() {
+    wireNamedAgents();
+    agentStates.put("cmd-ui", "IDLE");
+
+    Answer delivered =
+        post(BASE + "/named-agents/ui-builder/prompt", TOKEN, new JsonObject().put("text", "go"));
+    assertEquals(200, delivered.status());
+    assertEquals(
+        new JsonObject()
+            .put("commandId", "cmd-ui")
+            .put("state", "IDLE")
+            .put("delivered", true)
+            .put("queued", false)
+            .putNull("position"),
+        delivered.body());
+    assertEquals(List.of("cmd-ui:go"), typedToAgents);
+    assertTrue(typed.isEmpty(), "nothing reached the front desk");
+
+    agentStates.put("cmd-ui", "BUSY");
+    Answer queued =
+        post(BASE + "/named-agents/ui-builder/prompt", TOKEN, new JsonObject().put("text", "next"));
+    assertEquals(200, queued.status());
+    assertEquals(1, queued.body().getInteger("position"));
+    assertTrue(queued.body().getBoolean("queued"));
+
+    Answer answer = get(BASE + "/named-agents/ui-builder/last-answer", TOKEN);
+    assertEquals(200, answer.status());
+    assertEquals(
+        new JsonObject()
+            .put("commandId", "cmd-ui")
+            .put("sessionId", "sess-ui")
+            .put("state", "BUSY")
+            .put("text", "built")
+            .put("at", "2026-11-13T10:00:00Z"),
+        answer.body());
+  }
+
+  @Test
+  void aNamedAgentRouteRefusesWithTheContractsStatusCodes() {
+    wireNamedAgents();
+
+    Answer unknown =
+        post(BASE + "/named-agents/reviewer/prompt", TOKEN, new JsonObject().put("text", "hi"));
+    assertEquals(404, unknown.status(), "the frame names no agent:reviewer");
+    assertTrue(unknown.body().containsKey("reason"));
+    assertEquals(404, get(BASE + "/named-agents/reviewer/last-answer", TOKEN).status());
+
+    Answer malformed =
+        post(BASE + "/named-agents/Not_A_Name/prompt", TOKEN, new JsonObject().put("text", "hi"));
+    assertEquals(400, malformed.status());
+    assertTrue(malformed.body().containsKey("reason"));
+    assertEquals(400, get(BASE + "/named-agents/9lives/last-answer", TOKEN).status());
+
+    assertEquals(
+        400, post(BASE + "/named-agents/ui-builder/prompt", TOKEN, new JsonObject()).status());
+    assertEquals(
+        405, get(BASE + "/named-agents/ui-builder/prompt", TOKEN).status(), "prompt is a POST");
+    assertEquals(
+        404,
+        get(BASE + "/named-agents/ui-builder", TOKEN).status(),
+        "no route but the three it serves");
+
+    roster =
+        List.of(
+            new NamedAgentHost.Agent(
+                "ui-builder", "agent:ui-builder", "project.ui-builder", "FAILED", null, null));
+    Answer failed =
+        post(BASE + "/named-agents/ui-builder/prompt", TOKEN, new JsonObject().put("text", "hi"));
+    assertEquals(409, failed.status(), "a failed agent is not running, and nothing launches it");
+  }
 }

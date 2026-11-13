@@ -552,6 +552,157 @@ paths:
                 type: "object"
       security:
       - bearerAuth: []
+  /projects/container/{projectId}/named-agents:
+    get:
+      operationId: "listNamedAgents"
+      summary: "The named agents the sessions frame names, with their reported state"
+      parameters:
+      - name: "projectId"
+        in: "path"
+        required: true
+        schema:
+          type: "string"
+      responses:
+        "200":
+          description: "The named agents, in the frame's order"
+          content:
+            application/json:
+              schema:
+                type: "object"
+        "500":
+          description: "Internal error"
+          content:
+            application/json:
+              schema:
+                type: "object"
+        "503":
+          description: "Named agents are not available yet"
+          content:
+            application/json:
+              schema:
+                type: "object"
+      security:
+      - bearerAuth: []
+  /projects/container/{projectId}/named-agents/{name}/prompt:
+    post:
+      operationId: "promptNamedAgent"
+      summary: "Type a turn into a named agent, or queue it"
+      parameters:
+      - name: "projectId"
+        in: "path"
+        required: true
+        schema:
+          type: "string"
+      - name: "name"
+        in: "path"
+        required: true
+        schema:
+          type: "string"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: "object"
+              required:
+              - "text"
+              properties:
+                text:
+                  type: "string"
+              additionalProperties: true
+      responses:
+        "200":
+          description: "Delivered at once, or queued (also while the agent launches)"
+          content:
+            application/json:
+              schema:
+                type: "object"
+        "400":
+          description: "text is missing or blank, or the name is not a named agent's name"
+          content:
+            application/json:
+              schema:
+                type: "object"
+        "404":
+          description: "The sessions frame names no such agent"
+          content:
+            application/json:
+              schema:
+                type: "object"
+        "409":
+          description: "The named agent is not running"
+          content:
+            application/json:
+              schema:
+                type: "object"
+        "429":
+          description: "The named agent's inbox is full"
+          content:
+            application/json:
+              schema:
+                type: "object"
+        "500":
+          description: "Internal error"
+          content:
+            application/json:
+              schema:
+                type: "object"
+        "503":
+          description: "Named agents are not available yet"
+          content:
+            application/json:
+              schema:
+                type: "object"
+      security:
+      - bearerAuth: []
+  /projects/container/{projectId}/named-agents/{name}/last-answer:
+    get:
+      operationId: "getNamedAgentLastAnswer"
+      summary: "What a named agent answered last"
+      parameters:
+      - name: "projectId"
+        in: "path"
+        required: true
+        schema:
+          type: "string"
+      - name: "name"
+        in: "path"
+        required: true
+        schema:
+          type: "string"
+      responses:
+        "200":
+          description: "The latest answer"
+          content:
+            application/json:
+              schema:
+                type: "object"
+        "400":
+          description: "The name is not a named agent's name"
+          content:
+            application/json:
+              schema:
+                type: "object"
+        "404":
+          description: "The sessions frame names no such agent"
+          content:
+            application/json:
+              schema:
+                type: "object"
+        "500":
+          description: "Internal error"
+          content:
+            application/json:
+              schema:
+                type: "object"
+        "503":
+          description: "Named agents are not available yet"
+          content:
+            application/json:
+              schema:
+                type: "object"
+      security:
+      - bearerAuth: []
 components:
   securitySchemes:
     bearerAuth:

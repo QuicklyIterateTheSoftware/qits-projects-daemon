@@ -54,6 +54,7 @@ class OpenApiSchemaExportTest {
   private static final String PROJECT_ID = "openapi-guard-project";
   private static final String API_TOKEN = "openapi-guard-token";
   private static final String FIXED_COMMAND_ID = "openapi-guard-command";
+  private static final String FIXED_AGENT_NAME = "ui-builder";
 
   /** One query or path parameter beyond the universal {@code projectId}. */
   private record Param(String name, String in, List<String> enumValues) {
@@ -85,6 +86,7 @@ class OpenApiSchemaExportTest {
       String path = BASE + pathSuffix;
       path = path.replace("{projectId}", PROJECT_ID);
       path = path.replace("{commandId}", FIXED_COMMAND_ID);
+      path = path.replace("{name}", FIXED_AGENT_NAME);
       return path;
     }
   }
@@ -97,11 +99,12 @@ class OpenApiSchemaExportTest {
       Arrays.stream(LogChannel.values()).map(Enum::name).toList();
 
   /**
-   * The twelve operations, in the order {@link ProjectsApi}'s own javadoc lists them. Every status
-   * recorded here is one {@link ProjectsApi#dispatchCommand}, {@link ProjectsApi#dispatchAgent} or
-   * {@link ProjectsApi#dispatchFrontDesk} can actually answer for that call — including the three
-   * surfaces' shared "not available yet" 503 and their shared {@code RuntimeException -> 500}
-   * ladders, which apply to every operation of their surface alike.
+   * The fifteen operations, in the order {@link ProjectsApi}'s own javadoc lists them. Every status
+   * recorded here is one {@link ProjectsApi#dispatchCommand}, {@link ProjectsApi#dispatchAgent},
+   * {@link ProjectsApi#dispatchFrontDesk} or {@link ProjectsApi#dispatchNamedAgent} can actually
+   * answer for that call — including the four surfaces' shared "not available yet" 503 and their
+   * shared {@code RuntimeException -> 500} ladders, which apply to every operation of their surface
+   * alike.
    */
   private static final List<Op> OPERATIONS =
       List.of(
@@ -254,7 +257,46 @@ class OpenApiSchemaExportTest {
                   200, "The latest answer",
                   404, "No front desk is kept",
                   500, "Internal error",
-                  503, "The front desk is not available yet")));
+                  503, "The front desk is not available yet")),
+          new Op(
+              "listNamedAgents",
+              "get",
+              "/named-agents",
+              "The named agents the sessions frame names, with their reported state",
+              List.of(),
+              null,
+              Map.of(
+                  200, "The named agents, in the frame's order",
+                  500, "Internal error",
+                  503, "Named agents are not available yet")),
+          new Op(
+              "promptNamedAgent",
+              "post",
+              "/named-agents/{name}/prompt",
+              "Type a turn into a named agent, or queue it",
+              List.of(Param.path("name")),
+              new Body(true, List.of("text"), List.of("text"), "{\"text\":\"ping\"}"),
+              Map.of(
+                  200, "Delivered at once, or queued (also while the agent launches)",
+                  400, "text is missing or blank, or the name is not a named agent's name",
+                  404, "The sessions frame names no such agent",
+                  409, "The named agent is not running",
+                  429, "The named agent's inbox is full",
+                  500, "Internal error",
+                  503, "Named agents are not available yet")),
+          new Op(
+              "getNamedAgentLastAnswer",
+              "get",
+              "/named-agents/{name}/last-answer",
+              "What a named agent answered last",
+              List.of(Param.path("name")),
+              null,
+              Map.of(
+                  200, "The latest answer",
+                  400, "The name is not a named agent's name",
+                  404, "The sessions frame names no such agent",
+                  500, "Internal error",
+                  503, "Named agents are not available yet")));
 
   /**
    * Writes the document, then guards it. In that order on purpose: a route-table drift must still

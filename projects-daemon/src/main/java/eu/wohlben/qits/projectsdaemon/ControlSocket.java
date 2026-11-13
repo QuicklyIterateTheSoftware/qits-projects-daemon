@@ -370,6 +370,13 @@ public class ControlSocket {
   volatile FrontDeskInbox frontDeskInbox;
 
   /**
+   * The named agents {@link #wireAgents} built over {@link #sessionKeeper}'s {@code agent:<name>}
+   * keys (qits-2154): one inbox per agent behind {@code /named-agents}. Null when the agent surface
+   * stayed unwired.
+   */
+  volatile NamedAgentHost namedAgents;
+
+  /**
    * The session multiplex {@link #wireAgents} built over the wired launch service (qits-770): one
    * ladder per session key of qits' {@link Sessions} frame, the front desk's being {@link
    * #frontDesk}'s. Started beside the front desk once the provision succeeded. Null when the agent
@@ -734,7 +741,10 @@ public class ControlSocket {
             SessionKeeper.Timing.DEFAULT,
             SessionKeeper.Scheduler.worker("projects-daemon-sessions"),
             System::currentTimeMillis,
-            this::send);
+            this::send,
+            // A named agent keeps its session id on the claude volume as the desk does (qits-2154);
+            // a refinement keeps none.
+            key -> FrontDeskSessionRecord.forSessionKey(claudeMount, projectId, key));
     sessionKeeper = multiplex;
     Sessions held = lastSessions;
     if (held != null) {
@@ -764,10 +774,29 @@ public class ControlSocket {
     frontDeskInbox = inbox;
     // A resumed desk is told it was interrupted, as one turn the inbox types once it is idle.
     keeper.promptResumesTo(inbox::prompt);
+    // The named agents (qits-2154): an inbox each over its own kept command, on a flush worker of
+    // their own, so the desk's inbox and its thread stay exactly what they were.
+    NamedAgentHost agents =
+        new NamedAgentHost(
+            multiplex::namedAgents,
+            deskSession,
+            commandId ->
+                logs.log(commandId, null, LogChannel.TRANSCRIPT).stream()
+                    .map(CommandLogLine::content)
+                    .toList(),
+            SessionKeeper.Scheduler.worker("projects-daemon-named-agents"),
+            System::currentTimeMillis);
+    namedAgents = agents;
     if (h != null) {
-      h.setActivityListener(inbox::onActivity);
+      // The desk's inbox hears every activity first, as it always did; then the named agents'.
+      h.setActivityListener(
+          (commandId, state) -> {
+            inbox.onActivity(commandId, state);
+            agents.onActivity(commandId, state);
+          });
     }
     projectsApi.wireFrontDesk(inbox);
+    projectsApi.wireNamedAgents(agents);
     projectsApi.wireSessions(sessionCredentials);
     projectsApi.wireSessionKeys(multiplex::sessionKeyOf);
     projectsApi.wireAgents(
@@ -1070,6 +1099,10 @@ public class ControlSocket {
     FrontDeskInbox inbox = frontDeskInbox;
     if (inbox != null) {
       inbox.stop();
+    }
+    NamedAgentHost agents = namedAgents;
+    if (agents != null) {
+      agents.stop();
     }
     // Agents go first, before anything else is torn down — see stopAgents for why.
     stopAgents(commands);

@@ -15,6 +15,7 @@ import eu.wohlben.qits.commands.CommandStatus;
 import eu.wohlben.qits.commands.InvalidCommandRequestException;
 import eu.wohlben.qits.commands.LogChannel;
 import eu.wohlben.qits.commands.LogSeverity;
+import eu.wohlben.qits.projectsdaemon.protocol.NamedAgents;
 import eu.wohlben.qits.projectsdaemon.protocol.SessionCredentials;
 import io.vertx.core.Context;
 import io.vertx.core.Future;
@@ -57,6 +58,9 @@ import org.jboss.logging.Logger;
  *   GET  /agent-sessions               the session lineage tree
  *   POST /front-desk/prompt            type a turn into the kept front desk, or queue it
  *   GET  /front-desk/last-answer       the kept front desk's latest answer
+ *   GET  /named-agents                 the named agents the sessions frame names, and their state
+ *   POST /named-agents/{name}/prompt   type a turn into a named agent, or queue it
+ *   GET  /named-agents/{name}/last-answer   a named agent's latest answer
  *   WS   /terminal/commands/{id}       the interactive terminal
  *   WS   /chat/commands/{id}           the chat transport
  * </pre>
@@ -150,6 +154,17 @@ public class ProjectsApi {
 
   /** {@code GET /front-desk/last-answer} — what the kept front desk answered last. */
   static final String FRONT_DESK_LAST_ANSWER_PATH = "/front-desk/last-answer";
+
+  /**
+   * {@code GET /named-agents} — every named agent the current {@code sessions} frame names
+   * (qits-2154, {@link NamedAgentHost}); {@code /named-agents/{name}/prompt} and {@code
+   * /named-agents/{name}/last-answer} are the desk's two routes for one of them.
+   */
+  static final String NAMED_AGENTS_PATH = "/named-agents";
+
+  static final String NAMED_AGENT_PROMPT_SUFFIX = "/prompt";
+
+  static final String NAMED_AGENT_LAST_ANSWER_SUFFIX = "/last-answer";
 
   private static final String BEARER = "Bearer ";
 
@@ -263,6 +278,14 @@ public class ProjectsApi {
   /** Wire the front desk's inbox. {@link ControlSocket} calls it beside {@link #wireAgents}. */
   void wireFrontDesk(FrontDeskInbox frontDeskInbox) {
     this.frontDeskInbox = frontDeskInbox;
+  }
+
+  /** The named agents (qits-2154); null until wired, in which case their routes answer 503. */
+  private volatile NamedAgentHost namedAgents;
+
+  /** Wire the named agents. {@link ControlSocket} calls it beside {@link #wireFrontDesk}. */
+  void wireNamedAgents(NamedAgentHost namedAgents) {
+    this.namedAgents = namedAgents;
   }
 
   /** Wire the commands surface. */
@@ -466,6 +489,16 @@ public class ProjectsApi {
           request, path, (method, body) -> dispatchFrontDesk(inbox, method, path, body));
       return;
     }
+    if (isNamedAgentPath(path)) {
+      NamedAgentHost host = namedAgents;
+      if (host == null) {
+        respond(request, 503, FrontDeskJson.refused("Named agents are not available yet"));
+        return;
+      }
+      onBodyRequest(
+          request, path, (method, body) -> dispatchNamedAgent(host, method, path, body));
+      return;
+    }
     respond(request, 404, ProjectsJson.error("No such endpoint"));
   }
 
@@ -664,6 +697,100 @@ public class ProjectsApi {
       };
     } catch (RuntimeException e) {
       LOG.errorf(e, "projects-daemon front desk API failed handling %s", path);
+      return new Reply(500, FrontDeskJson.refused("Internal error"));
+    }
+  }
+
+  /**
+   * Whether {@code path} is one of the named agents' three routes: {@code /named-agents}, or {@code
+   * /named-agents/<segment>/prompt|last-answer} — any one segment, so a malformed name is answered
+   * 400 by {@link #dispatchNamedAgent} rather than as an unknown route.
+   */
+  private static boolean isNamedAgentPath(String path) {
+    if (path.equals(NAMED_AGENTS_PATH)) {
+      return true;
+    }
+    String rest = namedAgentRest(path);
+    return rest != null
+        && (rest.equals(NAMED_AGENT_PROMPT_SUFFIX) || rest.equals(NAMED_AGENT_LAST_ANSWER_SUFFIX));
+  }
+
+  /** The name segment of a {@code /named-agents/<name>/…} path, or null. */
+  private static String namedAgentName(String path) {
+    if (!path.startsWith(NAMED_AGENTS_PATH + "/")) {
+      return null;
+    }
+    String tail = path.substring(NAMED_AGENTS_PATH.length() + 1);
+    int slash = tail.indexOf('/');
+    return slash <= 0 ? null : tail.substring(0, slash);
+  }
+
+  /** What follows the name segment of a {@code /named-agents/<name>/…} path, or null. */
+  private static String namedAgentRest(String path) {
+    String name = namedAgentName(path);
+    return name == null ? null : path.substring(NAMED_AGENTS_PATH.length() + 1 + name.length());
+  }
+
+  /**
+   * Route and run one {@code /named-agents} request (qits-2154). Prompt and last answer are {@link
+   * #dispatchFrontDesk}'s contract for one agent — same bodies, same statuses — plus a 404 for a name
+   * the current {@code sessions} frame does not carry and a 400 for one that cannot be a name.
+   */
+  private Reply dispatchNamedAgent(
+      NamedAgentHost host, HttpMethod method, String path, String body) {
+    try {
+      if (NAMED_AGENTS_PATH.equals(path)) {
+        if (method != HttpMethod.GET) {
+          return new Reply(405, FrontDeskJson.refused("Method not allowed"));
+        }
+        return new Reply(200, FrontDeskJson.namedAgents(host.agents()));
+      }
+      String name = namedAgentName(path);
+      boolean prompt = NAMED_AGENT_PROMPT_SUFFIX.equals(namedAgentRest(path));
+      if (method != (prompt ? HttpMethod.POST : HttpMethod.GET)) {
+        return new Reply(405, FrontDeskJson.refused("Method not allowed"));
+      }
+      if (!NamedAgents.validName(name)) {
+        return new Reply(400, FrontDeskJson.refused("Not a named agent's name: " + name));
+      }
+      Reply unknown = new Reply(404, FrontDeskJson.refused("No named agent '" + name + "'"));
+      if (!prompt) {
+        return host.lastAnswer(name)
+            .map(answer -> new Reply(200, FrontDeskJson.answer(answer)))
+            .orElse(unknown);
+      }
+      JsonObject json;
+      try {
+        json = jsonBody(body);
+      } catch (InvalidCommandRequestException e) {
+        return new Reply(400, FrontDeskJson.refused(e.getMessage()));
+      }
+      String text = json.getValue("text") instanceof String value ? value : null;
+      if (text == null || text.isBlank()) {
+        return new Reply(400, FrontDeskJson.refused("text is required"));
+      }
+      return host.prompt(name, text)
+          .map(
+              outcome ->
+                  switch (outcome.kind()) {
+                    case DELIVERED, QUEUED -> new Reply(200, FrontDeskJson.prompted(outcome));
+                    case NO_DESK ->
+                        new Reply(
+                            409,
+                            FrontDeskJson.refused("The named agent '" + name + "' is not running"));
+                    case FULL ->
+                        new Reply(
+                            429,
+                            FrontDeskJson.refused(
+                                "The named agent '"
+                                    + name
+                                    + "' inbox is full ("
+                                    + FrontDeskInbox.CAPACITY
+                                    + " turns)"));
+                  })
+          .orElse(unknown);
+    } catch (RuntimeException e) {
+      LOG.errorf(e, "projects-daemon named agents API failed handling %s", path);
       return new Reply(500, FrontDeskJson.refused("Internal error"));
     }
   }
