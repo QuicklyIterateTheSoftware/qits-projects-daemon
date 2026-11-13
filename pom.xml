@@ -47,7 +47,7 @@
              is refused rather than guessed at. This daemon stopped reading the `desk` field in the
              same cutover (task 56a914b7), so the two belong together — on the older pin a body
              carrying neither key would have been guessed. -->
-        <qits-coding-agents.version>2026.1031.164420</qits-coding-agents.version>
+        <qits-coding-agents.version>2026.1113.30637</qits-coding-agents.version>
 
         <!-- pact-jvm, for the contract tests (ticket qits-1149): ConsumerPactVerificationTest
              verifies consumers' pacts against this daemon's provider side, on the version every
@@ -67,7 +67,7 @@
         <!-- The platform's shared rules, test scope only (qits-1754). ProviderStateCoverageTest is
              what this repo takes it for. Published by qits-integrations-quarkus into the same
              platform Maven repository as the coordinates above. -->
-        <qits.arch-rules.version>2026.1108.20205</qits.arch-rules.version>
+        <qits.arch-rules.version>2026.1113.14706</qits.arch-rules.version>
     </properties>
 
     <dependencyManagement>
