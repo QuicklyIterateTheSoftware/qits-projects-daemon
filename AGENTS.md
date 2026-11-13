@@ -60,6 +60,8 @@ library declares:
                             turn reaches the desk on a schedule (qits-1597)
     FrontDeskInbox          turns qits types into the keeper's own front desk (POST /front-desk/prompt),
                             queued while it is busy, and its last answer (GET /front-desk/last-answer)
+    NamedAgentHost          the named agents (qits-2154): one FrontDeskInbox per agent:<name> key of the
+                            sessions frame, behind /named-agents; the sessions are SessionKeeper's
     DaemonSecrets           keeping the daemon's secrets — QITS_DELIVERY_TOKEN(_SUBJECT), the API token,
                             its own QITS_TOKEN(_SUBJECT) — out of every child that is not meant to hold them
     SessionCredentialStore  the per-session tokens qits sends over the control socket, by session key, and
@@ -92,6 +94,37 @@ The last answer is
 the `text` blocks of the main-chain assistant entries after the last real user prompt on the
 TRANSCRIPT channel — `tool_result` user entries, meta and sidechain entries are not prompts, and
 `tool_use`/`thinking` blocks are never part of it.
+
+## Named agents (qits-2154)
+
+A **named agent** is a further kept Claude session in the desk's container, beside the front desk:
+tied to no entity, one per project and name, on its own surface and its own credential. `ui-builder`
+(surface `project.ui-builder`) is the pilot. The front desk is not one of them here — it keeps
+`FrontDeskKeeper`, its inbox and `/front-desk/*` exactly as they were.
+
+It is nothing but a key of the session multiplex: `agent:<name>`, the name matching
+`[a-z][a-z0-9-]{0,31}` (`NamedAgents` in the protocol module: `KEY_PREFIX`, `namedAgentKey(name)`,
+`namedAgentName(key)`, `validName`). qits sends it in `sessions` (its surface, `entity` null, its
+`resumeSessionId`) and `sessionCredentials` (the token it runs on) only to a daemon announcing
+capability 4. `SessionKeeper` runs it on the generic ladder; its surface is never `project.work`, so
+the desk's `holdOff` (a live `project.work` session) never sees it. Beside the ladder's rules it keeps
+the desk's session record, at `<claudeMount>/.qits/named-agents/<projectId>/<name>.session`
+(`FrontDeskSessionRecord.ofNamedAgent`), its resume when qits names none.
+
+Three loopback routes, same bearer, the desk's bodies for prompt and answer:
+
+    GET  /named-agents                     200 {agents: [{name, key, surface, state, commandId, sessionId}]}
+                                           in the frame's order; state is the key's sessionReport state
+    POST /named-agents/{name}/prompt {"text"}   200 {commandId, state, delivered, queued, position}
+                                           400 blank text or malformed name · 404 not in the frame ·
+                                           409 not running · 429 queue full
+    GET  /named-agents/{name}/last-answer  200 {commandId, sessionId, state, text, at} · 400 · 404
+
+The one difference from the desk's inbox: a named agent is started *by* being prompted, so while its
+key is `STARTING` a prompt queues (`commandId`/`state` null, a `position`) and the new session's first
+`IDLE` types it. A `STOPPED` or `FAILED` agent answers 409. Its last answer outlives the session that
+gave it (the last command this process saw it run), and is all-null before it ran at all. The
+terminal is the existing `WS /terminal/commands/{commandId}`.
 
 ## The clone-alone rule
 
@@ -132,7 +165,8 @@ A change to the protocol is therefore:
 
 Bump `CAPABILITY_VERSION` whenever the backend must branch on the change (2: `sessionCredentials`,
 qits-1482 — sent only to a daemon announcing 2; 3: `sessions`/`sessionReport`, the session multiplex,
-qits-770 — `sessions` sent only to a daemon announcing 3). It starts at **1**, not
+qits-770 — `sessions` sent only to a daemon announcing 3; 4: named agents, `agent:<name>` keys and
+`/named-agents`, qits-2154). It starts at **1**, not
 at the workspace daemon's 4: the two protocols share a shape and a lineage but not a namespace,
 and a shared number would suggest a compatibility relation that does not exist. Version 1 already
 binds loopback and serves `OpenStream`, which the workspace daemon only reached at 4 — there is no
@@ -558,6 +592,9 @@ The keys are `sessionCredentials`' keys, and each session runs on its own:
                   surface (epic.chat), launched withSessionKey(key, qualifiedId, facts) so it is named from
                   its entity, on the key's credential ONLY — no legacy fallback, so a refinement never
                   runs as the container
+    agent:<name>  a named agent (capability 4, qits-2154): the same ladder, its entry's own surface
+                  (project.ui-builder), no entity, its own credential and session record — see "Named
+                  agents"
 
 **One ladder per key** (`SessionLadder`), the front desk's rules written once: launch when wanted and
 missing; relaunch on exit, 5 s doubling to 5 min, reset after 10 min up, never giving up; resume while
