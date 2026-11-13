@@ -1,0 +1,12 @@
+{
+  "agents": [
+    {
+      "name": "ui-builder",
+      "key": "agent:ui-builder",
+      "surface": "project.ui-builder",
+      "state": "RUNNING",
+      "commandId": "00000000-0000-4000-8000-00000000ab01",
+      "sessionId": "00000000-0000-4000-8000-00000000ab02"
+    }
+  ]
+}

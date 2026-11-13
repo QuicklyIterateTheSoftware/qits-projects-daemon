@@ -62,6 +62,16 @@ public final class ProviderStates {
       "a daemon whose front desk is running";
 
   /**
+   * The daemon hosts one named agent (qits-2154), {@code ui-builder} on surface {@code
+   * project.ui-builder}: the current frame names its key {@code agent:ui-builder}, its session is
+   * RUNNING and idle, so {@code POST /named-agents/{name}/prompt} is typed at once ({@code delivered:
+   * true}), its transcript holds one finished turn for {@code GET /named-agents/{name}/last-answer},
+   * and {@code GET /named-agents} lists it. The agent's name is the {@code name} param.
+   */
+  public static final String A_DAEMON_WHOSE_NAMED_AGENT_IS_RUNNING =
+      "a daemon whose named agent is running";
+
+  /**
    * The daemon ran one declared action to completion (qits-1938): its store holds that finished
    * command — EXITED 0, no registry process behind it — with three captured output lines, and the
    * container declares that one action, so {@code POST /commands} of it launches. The command's id
@@ -116,6 +126,30 @@ public final class ProviderStates {
               + "\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\","
               + "\"text\":\"Two tickets are ready for dev: qits-1 and qits-2.\"}]}}");
 
+  /** The named agent the named-agent state hosts, and the surface its entry names. */
+  static final String NAMED_AGENT = "ui-builder";
+
+  static final String NAMED_AGENT_SURFACE = "project.ui-builder";
+
+  /** The named agent's kept command. */
+  static final String NAMED_AGENT_COMMAND_ID = "00000000-0000-4000-8000-00000000ab01";
+
+  /** The Claude session the named agent's transcript names. */
+  static final String NAMED_AGENT_SESSION_ID = "00000000-0000-4000-8000-00000000ab02";
+
+  /** The named agent's raw TRANSCRIPT channel: one prompt and one assistant text answer. */
+  static final List<String> NAMED_AGENT_TRANSCRIPT =
+      List.of(
+          "{\"type\":\"user\",\"sessionId\":\""
+              + NAMED_AGENT_SESSION_ID
+              + "\",\"timestamp\":\"2026-11-13T12:00:00.000Z\","
+              + "\"message\":{\"role\":\"user\",\"content\":\"Pitch a calmer header.\"}}",
+          "{\"type\":\"assistant\",\"sessionId\":\""
+              + NAMED_AGENT_SESSION_ID
+              + "\",\"timestamp\":\"2026-11-13T12:00:07.000Z\","
+              + "\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\","
+              + "\"text\":\"Pitched one snapshot: the header without its banner.\"}]}}");
+
   static final String PROJECT_ID = "00000000-0000-4000-8000-000000000001";
 
   /** The shared secret qits-projects injects as {@code QITS_PROJECTS_DAEMON_API_TOKEN}. */
@@ -139,6 +173,7 @@ public final class ProviderStates {
     states.put(A_DAEMON_WHOSE_HARNESSES_WERE_PROBED, this::aDaemonWhoseHarnessesWereProbed);
     states.put(A_DAEMON_WHOSE_AGENTS_ARE_NOT_WIRED_YET, this::aDaemonWhoseAgentsAreNotWiredYet);
     states.put(A_DAEMON_WHOSE_FRONT_DESK_IS_RUNNING, this::aDaemonWhoseFrontDeskIsRunning);
+    states.put(A_DAEMON_WHOSE_NAMED_AGENT_IS_RUNNING, this::aDaemonWhoseNamedAgentIsRunning);
     states.put(A_DAEMON_THAT_RAN_ONE_COMMAND, this::aDaemonThatRanOneCommand);
     states.put(A_DAEMON_THAT_DROVE_ONE_AGENT_SESSION, this::aDaemonThatDroveOneAgentSession);
     states.put(
@@ -184,6 +219,25 @@ public final class ProviderStates {
             probedHarnesses(),
             FRONT_DESK_COMMAND_ID,
             FRONT_DESK_TRANSCRIPT));
+  }
+
+  private Setup aDaemonWhoseNamedAgentIsRunning(Path root) {
+    Map<String, String> params = new TreeMap<>(params());
+    params.put("name", NAMED_AGENT);
+    return new Setup(
+        Collections.unmodifiableMap(params),
+        ContractSeams.startApiWithNamedAgent(
+            root,
+            PROJECT_ID,
+            API_TOKEN,
+            IMAGE_VERSION,
+            reportedBy(),
+            probedHarnesses(),
+            NAMED_AGENT,
+            NAMED_AGENT_SURFACE,
+            NAMED_AGENT_COMMAND_ID,
+            NAMED_AGENT_SESSION_ID,
+            NAMED_AGENT_TRANSCRIPT));
   }
 
   private Setup aDaemonThatRanOneCommand(Path root) {

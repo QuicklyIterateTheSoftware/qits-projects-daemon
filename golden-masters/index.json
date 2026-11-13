@@ -272,6 +272,60 @@
           }
         }
       ]
+    },
+    {
+      "name": "a daemon whose named agent is running",
+      "slug": "a-daemon-whose-named-agent-is-running",
+      "params": {
+        "apiToken": "daemon-api-token",
+        "name": "ui-builder",
+        "projectId": "00000000-0000-4000-8000-000000000001"
+      },
+      "dependsOn": [],
+      "operations": [
+        {
+          "operationId": "getNamedAgentLastAnswer",
+          "method": "GET",
+          "path": "/projects/container/{projectId}/named-agents/{name}/last-answer",
+          "status": 200,
+          "file": "a-daemon-whose-named-agent-is-running/getNamedAgentLastAnswer.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "listNamedAgents",
+          "method": "GET",
+          "path": "/projects/container/{projectId}/named-agents",
+          "status": 200,
+          "file": "a-daemon-whose-named-agent-is-running/listNamedAgents.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        },
+        {
+          "operationId": "promptNamedAgent",
+          "method": "POST",
+          "path": "/projects/container/{projectId}/named-agents/{name}/prompt",
+          "body": {
+            "text": "Pitch a calmer header."
+          },
+          "status": 200,
+          "file": "a-daemon-whose-named-agent-is-running/promptNamedAgent.json",
+          "frozen": {
+            "ids": [],
+            "instants": [],
+            "strings": [],
+            "listFilteredTo": null
+          }
+        }
+      ]
     }
   ]
 }

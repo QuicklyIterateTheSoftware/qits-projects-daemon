@@ -138,6 +138,73 @@ public final class ContractSeams {
   }
 
   /**
+   * The API with its agent surface wired (as {@link #startApi}) and one named agent (qits-2154):
+   * {@code name}, whose key {@code agent:<name>} the current frame names on {@code surface}, RUNNING
+   * as {@code commandId} in harness session {@code sessionId} and last reported {@code IDLE} — so
+   * {@code POST /named-agents/<name>/prompt} is typed at once (and swallowed: no PTY runs), {@code GET
+   * /named-agents/<name>/last-answer} reads {@code transcript}, and {@code GET /named-agents} lists
+   * it.
+   */
+  public static RunningApi startApiWithNamedAgent(
+      Path root,
+      String projectId,
+      String apiToken,
+      String imageVersion,
+      String reportedBy,
+      List<HarnessCapabilities> capabilities,
+      String name,
+      String surface,
+      String commandId,
+      String sessionId,
+      List<String> transcript) {
+    RunningApi running =
+        start(
+            root, projectId, apiToken, imageVersion, reportedBy, capabilities, true, new Wiring());
+    DeliveryKeeper.Session session =
+        new DeliveryKeeper.Session() {
+          @Override
+          public boolean running(String id) {
+            return commandId.equals(id);
+          }
+
+          @Override
+          public Optional<String> activityState(String id) {
+            return commandId.equals(id) ? Optional.of("IDLE") : Optional.empty();
+          }
+
+          @Override
+          public GuardedInput send(String id, String text) {
+            return commandId.equals(id) ? GuardedInput.WRITTEN : GuardedInput.NOT_RUNNING;
+          }
+        };
+    SessionKeeper.Scheduler never =
+        new SessionKeeper.Scheduler() {
+          @Override
+          public void schedule(Runnable step, long delayMs) {}
+
+          @Override
+          public void shutdown() {}
+        };
+    List<NamedAgentHost.Agent> roster =
+        List.of(
+            new NamedAgentHost.Agent(
+                name,
+                eu.wohlben.qits.projectsdaemon.protocol.NamedAgents.namedAgentKey(name),
+                surface,
+                "RUNNING",
+                commandId,
+                sessionId));
+    running.api.wireNamedAgents(
+        new NamedAgentHost(
+            () -> roster,
+            session,
+            id -> commandId.equals(id) ? transcript : List.of(),
+            never,
+            () -> 0L));
+    return running;
+  }
+
+  /**
    * The API with its agent surface wired (as {@link #startApi}) over a command store holding {@code
    * commands} — finished ones, which no registry process backs — whose log buffers hold {@code
    * logs}, and with {@code actions} declared, so {@code POST /commands} of one of them really

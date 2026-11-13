@@ -114,6 +114,25 @@ class GoldenMasterRecordingTest {
               "/projects/container/{projectId}/front-desk/last-answer",
               200),
           new Interaction(
+              ProviderStates.A_DAEMON_WHOSE_NAMED_AGENT_IS_RUNNING,
+              "promptNamedAgent",
+              "POST",
+              "/projects/container/{projectId}/named-agents/{name}/prompt",
+              "{\"text\":\"Pitch a calmer header.\"}",
+              200),
+          new Interaction(
+              ProviderStates.A_DAEMON_WHOSE_NAMED_AGENT_IS_RUNNING,
+              "getNamedAgentLastAnswer",
+              "GET",
+              "/projects/container/{projectId}/named-agents/{name}/last-answer",
+              200),
+          new Interaction(
+              ProviderStates.A_DAEMON_WHOSE_NAMED_AGENT_IS_RUNNING,
+              "listNamedAgents",
+              "GET",
+              "/projects/container/{projectId}/named-agents",
+              200),
+          new Interaction(
               ProviderStates.A_DAEMON_THAT_RAN_ONE_COMMAND,
               "listCommands",
               "GET",

@@ -129,6 +129,11 @@ class ConsumerPactVerificationTest {
     return running == null ? Map.of() : running.params();
   }
 
+  @State(ProviderStates.A_DAEMON_WHOSE_NAMED_AGENT_IS_RUNNING)
+  Map<String, String> aDaemonWhoseNamedAgentIsRunning() {
+    return running == null ? Map.of() : running.params();
+  }
+
   @State(ProviderStates.A_DAEMON_THAT_RAN_ONE_COMMAND)
   Map<String, String> aDaemonThatRanOneCommand() {
     return running == null ? Map.of() : running.params();
