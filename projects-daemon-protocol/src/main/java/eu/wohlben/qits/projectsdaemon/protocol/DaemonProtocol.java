@@ -33,8 +33,13 @@ public final class DaemonProtocol {
    * list of sessions, one per key — and answers with {@link SessionReport}. The backend sends {@link
    * Sessions} only to a daemon announcing 3 or later; until one arrives a daemon keeps the front desk
    * by its lifecycle setting and reports nothing, exactly as 2 did.
+   *
+   * <p>4 hosts named agents (qits-2154): a {@link Sessions} entry keyed {@code agent:<name>} ({@link
+   * NamedAgents}) is a kept session beside the front desk on its own surface and its own credential,
+   * tied to no entity, and the loopback API serves its prompt, last answer and listing ({@code
+   * /named-agents}). The backend asks a daemon for a named agent only when it announces 4 or later.
    */
-  public static final int CAPABILITY_VERSION = 3;
+  public static final int CAPABILITY_VERSION = 4;
 
   /**
    * The fixed {@code correlationId} the daemon tags its autonomous self-provision output ({@link

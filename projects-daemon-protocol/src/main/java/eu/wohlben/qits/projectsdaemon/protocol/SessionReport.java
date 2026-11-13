@@ -34,7 +34,9 @@ public record SessionReport(List<Session> sessions) implements DaemonMessage {
   /**
    * One key's state.
    *
-   * @param key the session key, as {@link Sessions} named it
+   * @param key the session key, as {@link Sessions} named it: {@link
+   *     SessionCredentials#FRONT_DESK_KEY}, an entity's UUID or a named agent's {@code
+   *     agent:<name>} ({@link NamedAgents})
    * @param state one of {@link DaemonProtocol.ReportedState}: {@code STARTING} — wanted, not
    *     running yet (waiting for the checkout, for its credential's grace window, for a person's own
    *     desk session to end, or between an exit and its relaunch); {@code RUNNING} — its session is

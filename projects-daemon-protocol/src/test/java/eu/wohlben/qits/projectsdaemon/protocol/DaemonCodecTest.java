@@ -241,7 +241,7 @@ class DaemonCodecTest {
   @Test
   void capabilityThreeIsTheOneThatRunsTheMultiplex() {
     // Literals, not the constants: these words are what qits-projects-service implements against.
-    assertEquals(3, DaemonProtocol.CAPABILITY_VERSION);
+    assertTrue(DaemonProtocol.CAPABILITY_VERSION >= 3);
     assertEquals("sessions", DaemonProtocol.Type.SESSIONS);
     assertEquals("sessionReport", DaemonProtocol.Type.SESSION_REPORT);
     assertEquals("RUNNING", DaemonProtocol.DesiredState.RUNNING);
@@ -362,6 +362,87 @@ class DaemonCodecTest {
     wire.put("type", "sessionReport");
     wire.put("sessions", List.of(Map.of("key", "front-desk"), Map.of("state", "RUNNING")));
     assertEquals(new SessionReport(List.of()), DaemonCodec.decode(wire));
+  }
+
+  // --- named agents (capability 4, qits-2154) ----------------------------------------------------
+
+  @Test
+  void capabilityFourIsTheOneThatHostsNamedAgents() {
+    // Literals: the key form is what qits-projects-service composes its frames from.
+    assertEquals(4, DaemonProtocol.CAPABILITY_VERSION);
+    assertEquals("agent:", NamedAgents.KEY_PREFIX);
+    assertEquals("agent:ui-builder", NamedAgents.namedAgentKey("ui-builder"));
+  }
+
+  @Test
+  void aNamedAgentKeyNamesItsAgentAndNothingElseDoes() {
+    assertEquals(java.util.Optional.of("ui-builder"), NamedAgents.namedAgentName("agent:ui-builder"));
+    assertEquals(java.util.Optional.of("a"), NamedAgents.namedAgentName("agent:a"));
+    assertEquals(
+        java.util.Optional.of("a" + "b".repeat(31)),
+        NamedAgents.namedAgentName("agent:a" + "b".repeat(31)));
+    for (String notOne :
+        new String[] {
+          null,
+          "",
+          "front-desk",
+          "desk-agents",
+          ENTITY_KEY,
+          "agent:",
+          "agent:Ui-builder",
+          "agent:1ui",
+          "agent:-ui",
+          "agent:ui_builder",
+          "agent:ui/builder",
+          "agent:../x",
+          "agent:a" + "b".repeat(32),
+          "Agent:ui-builder"
+        }) {
+      assertTrue(NamedAgents.namedAgentName(notOne).isEmpty(), "not a named agent: " + notOne);
+      assertFalse(NamedAgents.isNamedAgentKey(notOne), "not a named agent: " + notOne);
+    }
+    assertTrue(NamedAgents.validName("ui-builder"));
+    assertFalse(NamedAgents.validName("UI"));
+    assertThrows(IllegalArgumentException.class, () -> NamedAgents.namedAgentKey("Not/Valid"));
+    assertThrows(IllegalArgumentException.class, () -> NamedAgents.namedAgentKey(null));
+  }
+
+  @Test
+  void aNamedAgentRidesTheSessionsCredentialsAndReportUnderItsKey() {
+    Sessions frame =
+        new Sessions(
+            List.of(
+                new Sessions.Session(
+                    "agent:ui-builder",
+                    "project.ui-builder",
+                    "RUNNING",
+                    "22222222-2222-2222-2222-222222222222",
+                    null)));
+    assertEquals(frame, roundTrip(frame));
+    Map<String, Object> entry = new LinkedHashMap<>();
+    entry.put("key", "agent:ui-builder");
+    entry.put("surface", "project.ui-builder");
+    entry.put("state", "RUNNING");
+    entry.put("resumeSessionId", "22222222-2222-2222-2222-222222222222");
+    entry.put("entity", null);
+    assertEquals(List.of(entry), DaemonCodec.encode(frame).get("sessions"));
+
+    SessionCredentials credentials =
+        new SessionCredentials(
+            List.of(new SessionCredentials.Credential("agent:ui-builder", "qits_tok_ui", "tok-ui")));
+    assertEquals(credentials, roundTrip(credentials));
+    assertTrue(((SessionCredentials) roundTrip(credentials)).find("agent:ui-builder").isPresent());
+
+    SessionReport report =
+        new SessionReport(
+            List.of(
+                new SessionReport.Session(
+                    "agent:ui-builder",
+                    "RUNNING",
+                    "cmd-ui",
+                    "22222222-2222-2222-2222-222222222222",
+                    null)));
+    assertEquals(report, roundTrip(report));
   }
 
   @Test

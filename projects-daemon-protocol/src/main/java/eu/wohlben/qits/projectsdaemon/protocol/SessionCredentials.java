@@ -30,7 +30,8 @@ public record SessionCredentials(List<Credential> credentials) implements Daemon
   /**
    * The key every launch a person starts from the desk panel ({@code POST /agents}) runs on: a
    * desk-session token ({@code qits:agent} only), so a person-started session never holds {@code
-   * qits:desk}. A refinement session's key is its entity id (qits-770).
+   * qits:desk}. A refinement session's key is its entity id (qits-770), a named agent's its {@code
+   * agent:<name>} ({@link NamedAgents}, qits-2154).
    */
   public static final String DESK_AGENTS_KEY = "desk-agents";
 

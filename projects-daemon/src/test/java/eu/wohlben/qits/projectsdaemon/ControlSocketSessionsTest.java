@@ -95,10 +95,10 @@ class ControlSocketSessionsTest {
   }
 
   @Test
-  void helloAnnouncesCapabilityThree() {
+  void helloAnnouncesCapabilityFour() {
     ControlSocket socket = new ControlSocket();
     socket.projectId = "proj-1";
-    assertEquals(3, socket.hello().capabilityVersion());
+    assertEquals(4, socket.hello().capabilityVersion());
     assertEquals(DaemonProtocol.CAPABILITY_VERSION, socket.hello().capabilityVersion());
     assertEquals("proj-1", socket.hello().projectId());
   }

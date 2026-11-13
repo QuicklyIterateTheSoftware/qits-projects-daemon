@@ -30,6 +30,11 @@ import java.util.Optional;
  *   <li>an entity's UUID — a refinement's session, surface {@code epic.chat}: launched as an
  *       interactive {@code REPOSITORY}-scoped session named from its {@link Entity}, renamed in
  *       place when a later frame changes the entity's facts.
+ *   <li>{@code agent:<name>} ({@link NamedAgents}, capability 4) — a named agent (qits-2154): a kept
+ *       interactive session of its own {@link Session#surface} (e.g. {@code project.ui-builder})
+ *       beside the front desk, with {@link Session#entity} null. Never the front desk's surface, so
+ *       it never holds the desk's launch back; its prompts reach it through the daemon's {@code
+ *       /named-agents/{name}/prompt}.
  * </ul>
  *
  * <p>{@link SessionCredentials#DESK_AGENTS_KEY} is a credential, not a session: it never appears
@@ -57,7 +62,8 @@ public record Sessions(List<Session> sessions) implements DaemonMessage {
   /**
    * One wanted session.
    *
-   * @param key the session key: {@link SessionCredentials#FRONT_DESK_KEY} or an entity's UUID
+   * @param key the session key: {@link SessionCredentials#FRONT_DESK_KEY}, an entity's UUID or a
+   *     named agent's {@code agent:<name>} ({@link NamedAgents#namedAgentKey})
    * @param surface the agent surface it launches as, an {@code AgentSurface} key such as {@code
    *     epic.chat}; an unknown one is reported {@code FAILED}. Ignored for the front desk
    * @param state {@link DaemonProtocol.DesiredState#RUNNING} or {@link
@@ -67,7 +73,8 @@ public record Sessions(List<Session> sessions) implements DaemonMessage {
    *     Preferred over the daemon's own memory of the key's last session, and used only while its
    *     transcript is still on the credential volume — otherwise the launch is fresh. qits learns the
    *     id from {@link SessionReport.Session#sessionId}, so a key survives a container recreation
-   * @param entity what the session is about, or null (the front desk; any key without one)
+   * @param entity what the session is about, or null (the front desk, a named agent; any key
+   *     without one)
    */
   public record Session(
       String key, String surface, String state, String resumeSessionId, Entity entity) {
