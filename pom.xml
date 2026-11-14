@@ -14,7 +14,7 @@
          registry, where eu.wohlben.qits:qits-coding-agents is published. -->
     <groupId>eu.wohlben</groupId>
     <artifactId>qits</artifactId>
-    <version>2026.1114.81439</version>
+    <version>2026.1114.103204</version>
     <packaging>pom</packaging>
 
     <modules>
